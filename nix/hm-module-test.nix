@@ -91,6 +91,21 @@ let
     };
   };
 
+  flagged = eval {
+    config.services.task-fs = {
+      enable = true;
+      automount = {
+        enable = true;
+        path = "~/some/path";
+        mountFlags = [
+          "--virtual-tags"
+          "COMPLETED,DUE"
+          "--virtual-hidden"
+        ];
+      };
+    };
+  };
+
   disabled = eval { };
 
   wrapped = lib.evalModules {
@@ -188,6 +203,14 @@ let
     {
       cond = lib.hasInfix "mount /mnt/tasks" absolute.config.systemd.user.services.task-fs.Service.ExecStart;
       msg = "An absolute mount path is not used as-is: ${absolute.config.systemd.user.services.task-fs.Service.ExecStart}";
+    }
+    {
+      cond = lib.hasInfix "mount --virtual-tags COMPLETED,DUE --virtual-hidden /home/testuser/some/path" flagged.config.systemd.user.services.task-fs.Service.ExecStart;
+      msg = "automount.mountFlags are not passed to the mount command: ${flagged.config.systemd.user.services.task-fs.Service.ExecStart}";
+    }
+    {
+      cond = !lib.hasInfix "--virtual" unit.Service.ExecStart;
+      msg = "Unset automount.mountFlags leak flags into the mount command: ${unit.Service.ExecStart}";
     }
     {
       cond = disabled.config.home.packages == [ ] && !(disabled.config.systemd.user.services ? task-fs);

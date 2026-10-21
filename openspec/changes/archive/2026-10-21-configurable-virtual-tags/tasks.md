@@ -21,3 +21,8 @@
 
 - [x] 4.1 Update `README.md`: the new flags, the changed default selection and presentation, and the `--virtual-hidden --virtual-tags ALL` rollback pairing; verify the documented commands match the implementation
 - [x] 4.2 Run `go test ./...` and `go vet ./...` and fix any fallout; run a live mount (with and without `-H`, with `-t ALL`) and confirm listing presentation, both-spelling lookup, and the `+COMPLETED` completion gesture behave per the specs
+
+## 5. Home Manager module
+
+- [x] 5.1 Add `services.task-fs.automount.mountFlags` (list of strings, default empty, description showing the `--virtual-tags "..."`/`--virtual-hidden` example) to `nix/home-manager.nix` and interpolate it into the automount `ExecStart`; extend `nix/hm-module-test.nix` with a mountFlags evaluation asserting the flags land in the unit and the default leaves the command unchanged; verify with `nix build .#checks.hm-module`
+- [x] 5.2 Document the option in the README Home Manager section and verify the documented snippet matches the option semantics

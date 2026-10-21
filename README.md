@@ -87,6 +87,18 @@ environment, not your interactive shell. For an alternate database, set
 systemd.user.sessionEnvironment.TASKDATA = "/home/me/other-tasks";
 ```
 
+The automount accepts mount flags through
+`services.task-fs.automount.mountFlags`, a list of strings where each item
+is one command-line token:
+
+```nix
+services.task-fs.automount.mountFlags = [
+  "--virtual-tags"
+  "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"
+  "--virtual-hidden"
+];
+```
+
 ## The path grammar
 
 A path is a task filter. Segments are order-free; these two paths are the

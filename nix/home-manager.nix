@@ -40,6 +40,22 @@ in
           the user's home directory.
         '';
       };
+
+      mountFlags = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [
+          "--virtual-tags"
+          "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"
+          "--virtual-hidden"
+        ];
+        description = ''
+          Flags passed to `task-fs mount` by the automount service. Each
+          item is one command-line token. For example, the example value
+          narrows the virtual-tag views to the listed set and presents
+          them as hidden `.+NAME` directories.
+        '';
+      };
     };
   };
 
@@ -69,7 +85,9 @@ in
 
       Service = {
         ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${mountPath}";
-        ExecStart = "${cfg.package}/bin/task-fs mount ${mountPath}";
+        ExecStart = "${cfg.package}/bin/task-fs mount ${
+          lib.concatStringsSep " " (cfg.automount.mountFlags ++ [ mountPath ])
+        }";
         ExecStopPost = "-fusermount3 -u ${mountPath}";
         Restart = "on-failure";
         Environment = [

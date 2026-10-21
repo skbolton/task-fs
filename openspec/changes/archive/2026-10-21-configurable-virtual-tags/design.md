@@ -46,6 +46,10 @@ Consequences handled explicitly:
 
 The existing guard (list virtual-tag entries only when the accumulated filter carries none) stays; only the entry names and the source list change.
 
+### Home Manager option: `automount.mountFlags` as a token list
+
+Expose `services.task-fs.automount.mountFlags` (list of strings, default empty), interpolated into the automount unit's `ExecStart` between `mount` and the mountpoint: `task-fs mount ${concatStringsSep " " (mountFlags ++ [ mountPath ])}`. Each list item is one argv token, so a value-taking flag is two items (`"--virtual-tags" "COMPLETED,DUE"`); this avoids shell quoting in the unit and matches how systemd splits `ExecStart`. The option lives under `automount` because the mount command exists only in the automount service. The mount already accepts flags in any position relative to the mountpoint, so the placement is safe. Alternative: a freeform string option — rejected, it invites quoting bugs.
+
 ## Risks / Trade-offs
 
 - [Default entries missing from a backend's `_tags` output are silently dropped] → Intersection is deliberate; a mount that half-honors defaults beats one that refuses to start. Documented in the flag's help text.
