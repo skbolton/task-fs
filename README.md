@@ -30,6 +30,40 @@ TaskFS never reads Taskwarrior data files directly — every listing is an
 on-demand `task` invocation, so changes made with the CLI in another
 terminal are visible immediately.
 
+## Home Manager
+
+Add this repository as a flake input, import the module, and enable the
+service:
+
+```nix
+{
+  inputs.task-fs.url = "github:<owner>/task-fs";
+
+  imports = [ inputs.task-fs.homeModules.task-fs ];
+
+  services.task-fs = {
+    enable = true;
+    automount = {
+      enable = true;
+      path = "~/some/path";
+    };
+  };
+}
+```
+
+`services.task-fs.package` overrides the mounted binary; it defaults to the
+package built by this flake. The automount runs as a systemd user service:
+it creates the mountpoint if needed, mounts on session start, and unmounts
+when the session ends. Linux only.
+
+The mount resolves its Taskwarrior database from the systemd user manager's
+environment, not your interactive shell. For an alternate database, set
+`TASKDATA` in the session environment:
+
+```nix
+systemd.user.sessionEnvironment.TASKDATA = "/home/me/other-tasks";
+```
+
 ## The path grammar
 
 A path is a task filter. Segments are order-free; these two paths are the

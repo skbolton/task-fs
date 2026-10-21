@@ -33,6 +33,15 @@
             vendorHash = "sha256-DLY5UEeBZN/fz+qDZ+Nni9DyzIayMP5rAjQJPyK1yQc=";
           };
 
+          checks.hm-module = import ./nix/hm-module-test.nix {
+            lib = pkgs.lib;
+            inherit pkgs;
+            module = import ./nix/home-manager.nix;
+            taskFsFlake = {
+              packages.${system}.default = self'.packages.default;
+            };
+          };
+
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
               openspec
@@ -43,6 +52,7 @@
           };
         };
       flake = {
+        homeModules.task-fs = args: import ./nix/home-manager.nix (args // { taskFsFlake = inputs.self; });
       };
     };
 }
