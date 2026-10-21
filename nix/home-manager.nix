@@ -46,7 +46,7 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = pkgs.stdenv.isLinux;
+        assertion = pkgs.stdenv.hostPlatform.isLinux;
         message = "services.task-fs: TaskFS supports Linux only (it requires Linux FUSE).";
       }
       {

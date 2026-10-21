@@ -2,13 +2,17 @@
   lib,
   pkgs,
   module,
+  wrappedModule,
+  flakePackage,
   taskFsFlake,
 }:
 
 let
   linuxPkgs = pkgs // {
     stdenv = pkgs.stdenv // {
-      isLinux = true;
+      hostPlatform = pkgs.stdenv.hostPlatform // {
+        isLinux = true;
+      };
     };
   };
 
@@ -89,10 +93,30 @@ let
 
   disabled = eval { };
 
+  wrapped = lib.evalModules {
+    modules = [
+      wrappedModule
+      stubs
+      {
+        config.services.task-fs = {
+          enable = true;
+          automount = {
+            enable = true;
+            path = "~/some/path";
+          };
+        };
+      }
+    ];
+    specialArgs = { inherit pkgs; };
+  };
+  wrappedUnit = wrapped.config.systemd.user.services.task-fs;
+
   nonLinux = eval {
     pkgsOverride = pkgs // {
       stdenv = pkgs.stdenv // {
-        isLinux = false;
+        hostPlatform = pkgs.stdenv.hostPlatform // {
+          isLinux = false;
+        };
       };
     };
     config.services.task-fs = {
@@ -172,6 +196,14 @@ let
     {
       cond = lib.any (a: !a.assertion && lib.hasInfix "Linux" a.message) nonLinux.config.assertions;
       msg = "Non-Linux evaluation does not produce the Linux-only assertion failure";
+    }
+    {
+      cond = wrapped.config.services.task-fs.package == flakePackage;
+      msg = "The wrapped homeModules.task-fs output does not default to the flake package";
+    }
+    {
+      cond = lib.hasPrefix (toString flakePackage) wrappedUnit.Service.ExecStart;
+      msg = "The wrapped homeModules.task-fs output does not mount with the flake package: ${wrappedUnit.Service.ExecStart}";
     }
   ];
 
