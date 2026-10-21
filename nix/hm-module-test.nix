@@ -160,14 +160,14 @@ let
     {
       cond =
         unit.Service.Environment == [
-          "PATH=${
+          "PATH=/run/wrappers/bin:${
             lib.makeBinPath [
               pkgs.taskwarrior3
               pkgs.fuse3
             ]
           }"
         ];
-      msg = "Unit PATH does not provide taskwarrior3 and fuse3";
+      msg = "Unit PATH does not prefer the setuid wrapper and provide taskwarrior3 and fuse3";
     }
     {
       cond = lib.elem flakePackage default.config.home.packages;

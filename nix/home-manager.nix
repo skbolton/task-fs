@@ -70,10 +70,10 @@ in
       Service = {
         ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${mountPath}";
         ExecStart = "${cfg.package}/bin/task-fs mount ${mountPath}";
-        ExecStopPost = "-${pkgs.fuse3}/bin/fusermount3 -u ${mountPath}";
+        ExecStopPost = "-fusermount3 -u ${mountPath}";
         Restart = "on-failure";
         Environment = [
-          "PATH=${
+          "PATH=/run/wrappers/bin:${
             lib.makeBinPath [
               pkgs.taskwarrior3
               pkgs.fuse3
