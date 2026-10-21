@@ -30,6 +30,25 @@ databases work through the environment:
 TASKDATA=$HOME/other-tasks task-fs mount ~/c/TaskFS
 ```
 
+Two flags shape the virtual-tag views (the uppercase Taskwarrior-derived
+filters such as `COMPLETED` and `DUE`):
+
+```sh
+task-fs mount ~/c/TaskFS --virtual-tags "COMPLETED,OVERDUE,DUE,PENDING,ACTIVE"
+task-fs mount ~/c/TaskFS --virtual-hidden
+```
+
+- `--virtual-tags` (`-t`) takes a comma-separated list of virtual tags
+  without the `+` sign, or `ALL` for every derived filter your Taskwarrior
+  knows. The default is `COMPLETED,OVERDUE,DUE,ACTIVE,WAITING`. Every entry
+  is validated against what Taskwarrior discovers, and an unknown name
+  aborts the mount.
+- `--virtual-hidden` (`-H`) presents the virtual-tag views as hidden
+  `.+NAME` directories; without it they are ordinary `+NAME` directories.
+  Both spellings resolve on lookup no matter how they are listed. The old
+  behavior — every discovered virtual tag, hidden — is
+  `--virtual-hidden --virtual-tags ALL`.
+
 TaskFS never reads Taskwarrior data files directly — every listing is an
 on-demand `task` invocation, so changes made with the CLI in another
 terminal are visible immediately.
@@ -88,15 +107,15 @@ same view:
 - **Tag segments** (`+next`, `+shopping`, ...) filter to tasks carrying the
   tag. Tag views without a project segment (e.g. `/+next`) list matching
   tasks of every project depth.
-- **Uppercase `+` segments prefixed with a dot are virtual tags**: hidden
-  entries like `.+COMPLETED`, `.+DUE`, `.+OVERDUE` — Taskwarrior's derived
-  filters. The dot prefix makes them hidden files, so plain `ls` and file
-  managers hide them; use `ls -a` or the "show hidden files" toggle to see
-  them. The dot form is the only spelling: `+COMPLETED` does not resolve,
-  and a bare uppercase `+` segment is treated as an ordinary
-  (case-sensitive) tag.
+- **Uppercase `+` segments are virtual tags**: `+COMPLETED`, `+DUE`,
+  `+OVERDUE`, ... — Taskwarrior's derived filters. Which ones exist is
+  chosen at mount time with `--virtual-tags` (above). Each selected view
+  can also be spelled with a dot prefix (`.+COMPLETED`); the dot form is
+  how they are listed under `--virtual-hidden`, where they are hidden
+  files so plain `ls` and file managers hide them — use `ls -a` or the
+  "show hidden files" toggle to see them.
 - **Pending by default**: without a status segment the tree shows pending
-  tasks. Under `.+COMPLETED` the tree shows completed tasks.
+  tasks. Under `+COMPLETED` the tree shows completed tasks.
 
 Only segments that exist — derivable from your tasks, or declared with
 `mkdir` (below) — resolve. A typo fails with ENOENT instead of showing an
@@ -136,8 +155,8 @@ to task annotations.
 | --- | --- |
 | `touch "Description"` | Adds a task with the current directory's project and tags. |
 | `rm <taskfile>` | Deletes the task. |
-| `mv <taskfile> .+COMPLETED/` | Completes the task (rest of the destination path is ignored). |
-| `mv <taskfile> out of .+COMPLETED` | Reopens the task and applies the destination's project/tags. |
+| `mv <taskfile> +COMPLETED/` | Completes the task (rest of the destination path is ignored; `.+COMPLETED/` works too). |
+| `mv <taskfile> out of +COMPLETED` | Reopens the task and applies the destination's project/tags. |
 | `mv <taskfile> <other-dir>` | The task's project and tags match the destination: projects set exactly (moving to a parent drops the subproject), tags added or removed per the filter delta. |
 | `mv <taskfile> /new/deep/dir` (no trailing slash) | The final component is minted as a new project segment, provided the parent path exists. |
 | `mkdir +tag` or `mkdir project-segment` | Declares a namespace that no task matches yet, so a later move can land there. |
@@ -145,12 +164,12 @@ to task annotations.
 Notes:
 
 - Creating a task inside a virtual-tag view works: virtual tags are dropped
-  from the write filter (`touch x` in `/home/.+DUE` creates a task in
+  from the write filter (`touch x` in `/home/+DUE` creates a task in
   `home`), so the new file appears one level up.
 - `mv` is a filter delta: moving from `/home/+next` to `/finances/+urgent`
   sets project `finances`, removes `next`, adds `urgent`. Renaming a task
   file (changing its description) is not supported in this version.
-- Moving into a read-only virtual-tag view (`.+DUE`, `.+OVERDUE`, ...) fails,
+- Moving into a read-only virtual-tag view (`+DUE`, `+OVERDUE`, ...) fails,
   since those statuses are derived, not assignable.
 - `mkdir` declarations last for the mount session only; once a task lands
   there the directory exists from the task data itself.

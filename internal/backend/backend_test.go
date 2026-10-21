@@ -187,6 +187,50 @@ func TestVirtualTagsFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestResolveVirtualTags(t *testing.T) {
+	discovered := []string{"ACTIVE", "COMPLETED", "DUE", "OVERDUE", "WAITING"}
+	tests := []struct {
+		name      string
+		selection string
+		want      []string
+		wantErr   bool
+	}{
+		{"default selection accepted", "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING", []string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE", "WAITING"}, false},
+		{"explicit list", "COMPLETED,DUE", []string{"COMPLETED", "DUE"}, false},
+		{"ALL expands to discovery", "ALL", discovered, false},
+		{"whitespace trimmed", " COMPLETED , DUE ", []string{"COMPLETED", "DUE"}, false},
+		{"ALL mixed with entries", "ALL,COMPLETED", nil, true},
+		{"unknown entry", "COMPLETED,bogus", nil, true},
+		{"lowercase entry", "completed", nil, true},
+		{"empty entry", "COMPLETED,,DUE", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveVirtualTags(tt.selection, discovered)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveVirtualTags(%q) = %v, want error", tt.selection, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveVirtualTags(%q): %v", tt.selection, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ResolveVirtualTags(%q) = %v, want %v", tt.selection, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultVirtualTagsIntersectsDiscovery(t *testing.T) {
+	got := DefaultVirtualTags([]string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE"})
+	want := []string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DefaultVirtualTags = %v, want %v", got, want)
+	}
+}
+
 func TestVirtualTagGestureMapping(t *testing.T) {
 	if s, ok := StatusVirtualTag("COMPLETED"); !ok || s != "status:completed" {
 		t.Errorf("COMPLETED = %q, %v", s, ok)

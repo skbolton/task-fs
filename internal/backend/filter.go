@@ -43,6 +43,40 @@ func StatusVirtualTag(name string) (string, bool) {
 	return s, ok
 }
 
+// WithVirtualSegment extends the filter by a virtual-tag segment
+// spelled +NAME or .+NAME, so both spellings resolve a selected
+// virtual tag regardless of the presentation mode.
+func (f Filter) WithVirtualSegment(seg string) (Filter, error) {
+	name, ok := virtualTagName(seg)
+	if !ok {
+		return f, fmt.Errorf("not a virtual-tag segment %q", seg)
+	}
+	if name == "" {
+		return f, fmt.Errorf("empty virtual-tag segment %q", seg)
+	}
+	if !isUppercase(name) {
+		return f, fmt.Errorf("invalid virtual-tag segment %q", seg)
+	}
+	for _, vt := range f.VirtualTags {
+		if vt == name {
+			return f, fmt.Errorf("segment %q already in filter", seg)
+		}
+	}
+	out := f.clone()
+	out.VirtualTags = append(out.VirtualTags, name)
+	return out, nil
+}
+
+func virtualTagName(seg string) (string, bool) {
+	if strings.HasPrefix(seg, ".+") {
+		return seg[2:], true
+	}
+	if strings.HasPrefix(seg, "+") {
+		return seg[1:], true
+	}
+	return "", false
+}
+
 // WithSegment returns the filter extended by one path segment: ".+X"
 // where X is fully uppercase is a virtual tag, "+x" is a tag, anything
 // else is a project segment appended to the dotted prefix.
