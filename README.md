@@ -1,5 +1,10 @@
 # TaskFS
 
+>[!CAUTION]
+> Currently iterating with an agent to prototype this out.
+> I am planning to circle back and harden things as I learn more
+> This is alpha software
+
 TaskFS mounts your Taskwarrior database as a FUSE filesystem. Your project
 hierarchy and tags become directories, tasks become files, and the ordinary
 file gestures — `touch`, `rm`, `mv`, `mkdir` — talk to the `task` CLI. Use
