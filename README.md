@@ -1,9 +1,8 @@
 # TaskFS
 
 >[!CAUTION]
-> Currently iterating with an agent to prototype this out.
-> I am planning to circle back and harden things as I learn more
-> This is alpha software
+> Currently iterating with an agent to prototype this out. Consider this alpha software that is sure to have issues and
+> breaking changes as development evolves.
 
 TaskFS mounts your Taskwarrior database as a FUSE filesystem. Your project
 hierarchy and tags become directories, tasks become files, and the ordinary
