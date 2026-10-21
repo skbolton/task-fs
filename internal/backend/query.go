@@ -26,6 +26,31 @@ func (q *Query) Export(f Filter) ([]Task, error) {
 	return ParseExport(out)
 }
 
+// SweepTasks exports every task matching the filter with a status
+// other than deleted, across statuses, for directory-level deletion.
+func (q *Query) SweepTasks(f Filter) ([]Task, error) {
+	out, err := q.run(append(f.RenderSweep(), "export"))
+	if err != nil {
+		return nil, err
+	}
+	return ParseExport(out)
+}
+
+// HasAnyTask reports whether any task, including deleted ones, matches
+// the filter. Directory removal uses it to tell a directory that once
+// held tasks from a name that never existed.
+func (q *Query) HasAnyTask(f Filter) (bool, error) {
+	out, err := q.run(append(f.criteriaArgs(), "export"))
+	if err != nil {
+		return false, err
+	}
+	tasks, err := ParseExport(out)
+	if err != nil {
+		return false, err
+	}
+	return len(tasks) > 0, nil
+}
+
 // UniqueProjects returns the project values of tasks matching the
 // filter; each value is a full dotted project name.
 func (q *Query) UniqueProjects(f Filter) ([]string, error) {

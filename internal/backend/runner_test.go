@@ -53,3 +53,22 @@ func TestExportQueryComposition(t *testing.T) {
 		t.Errorf("args = %v, want %v", runner.args, want)
 	}
 }
+
+func TestSweepTasksQueryComposition(t *testing.T) {
+	runner := &stubRunner{out: []byte(`[{"uuid":"a1b2c3d4-0000-0000-0000-000000000000","description":"Do taxes","project":"home","status":"pending"}]`)}
+	q := NewQuery(runner)
+	var f Filter
+	f, _ = f.WithSegment("home")
+	f, _ = f.WithSegment("+next")
+	tasks, err := q.SweepTasks(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"project:home", "+next", "status.not:deleted", "export"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Errorf("args = %v, want %v", runner.args, want)
+	}
+	if len(tasks) != 1 || tasks[0].UUID != "a1b2c3d4-0000-0000-0000-000000000000" {
+		t.Errorf("sweep tasks = %+v", tasks)
+	}
+}

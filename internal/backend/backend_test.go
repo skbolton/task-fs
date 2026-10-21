@@ -124,6 +124,39 @@ func TestWriteFilterDropsVirtualTags(t *testing.T) {
 	}
 }
 
+func TestFilterRenderSweep(t *testing.T) {
+	tests := []struct {
+		name string
+		path []string
+		want []string
+	}{
+		{"root", nil, []string{"status.not:deleted"}},
+		{"project", []string{"home"}, []string{"project:home", "status.not:deleted"}},
+		{"tagged", []string{"home", "+next"}, []string{"project:home", "+next", "status.not:deleted"}},
+		{"completed view", []string{".+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted"}},
+		{"write filter drops virtual tags", []string{"home", ".+PENDING"}, []string{"project:home", "status.not:deleted"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var f Filter
+			var err error
+			for _, seg := range tt.path {
+				f, err = f.WithSegment(seg)
+				if err != nil {
+					t.Fatalf("WithSegment(%q): %v", seg, err)
+				}
+			}
+			got := f.RenderSweep()
+			if tt.name == "write filter drops virtual tags" {
+				got = f.WriteFilter().RenderSweep()
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("sweep render = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestChildProjects(t *testing.T) {
 	children := ChildProjects("finances", []string{
 		"finances", "finances.2026-taxes", "finances.2026-taxes.federal", "home",

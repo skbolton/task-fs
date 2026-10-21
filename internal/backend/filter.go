@@ -108,6 +108,24 @@ func (f Filter) WriteFilter() Filter {
 // Render produces the taskwarrior filter arguments. A filter without a
 // status virtual tag defaults to status:pending.
 func (f Filter) Render() []string {
+	args := f.criteriaArgs()
+	if !f.HasStatus() {
+		args = append(args, "status:pending")
+	}
+	return args
+}
+
+// RenderSweep renders the filter for a deletion sweep: the same
+// criteria as Render but without the implicit status:pending default,
+// and excluding already-deleted tasks, so pending and completed work
+// both match.
+func (f Filter) RenderSweep() []string {
+	args := f.criteriaArgs()
+	args = append(args, "status.not:deleted")
+	return args
+}
+
+func (f Filter) criteriaArgs() []string {
 	var args []string
 	if f.Project != "" {
 		args = append(args, "project:"+f.Project)
@@ -121,9 +139,6 @@ func (f Filter) Render() []string {
 		} else {
 			args = append(args, "+"+vt)
 		}
-	}
-	if !f.HasStatus() {
-		args = append(args, "status:pending")
 	}
 	return args
 }

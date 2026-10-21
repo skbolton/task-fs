@@ -620,24 +620,10 @@ func TestMkdirDeclarations(t *testing.T) {
 	}
 }
 
-func TestRmdirInUse(t *testing.T) {
-	runner := &fakeRunner{fn: func(args []string) ([]byte, error) {
-		if hasArg(args, "_unique") {
-			if hasArg(args, "project") {
-				return []byte("home"), nil
-			}
-			return []byte("next"), nil
-		}
-		if hasArg(args, "export") && hasArg(args, "+urgent") {
-			return taskJSON(task(uuidB, "Urgent thing", "home", "urgent")), nil
-		}
-		if hasArg(args, "export") {
-			return taskJSON(task(uuidA, "Chore", "home", "next")), nil
-		}
-		return nil, nil
-	}}
-	fs := New(backend.NewQuery(runner))
-	fs.SetVirtualTags([]string{"COMPLETED"})
+func TestRmdirDeclaredInUseDeletesTasks(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Chore", Project: "home", Tags: []string{"next"}, Status: "pending"},
+	)
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
@@ -646,8 +632,23 @@ func TestRmdirInUse(t *testing.T) {
 	if _, errno := homeNode.declareChild("+urgent"); errno != 0 {
 		t.Fatalf("mkdir +urgent: %v", errno)
 	}
-	if errno := homeNode.Rmdir(context.Background(), "+urgent"); errno != syscall.ENOTEMPTY {
-		t.Errorf("rmdir in-use tag: errno = %v, want ENOTEMPTY", errno)
+	// The declared tag becomes in use: a task lands under it afterwards.
+	db.tasks = append(db.tasks, backend.Task{UUID: uuidB, Description: "Urgent thing", Project: "home", Tags: []string{"urgent"}, Status: "pending"})
+	if errno := homeNode.Rmdir(context.Background(), "+urgent"); errno != 0 {
+		t.Fatalf("rmdir in-use tag: %v", errno)
+	}
+	if got := rmdirDeletedUUIDs(runner); len(got) != 1 || got[0] != uuidB {
+		t.Errorf("deleted uuids = %v, want [%s]", got, uuidB)
+	}
+	if db.deleted[uuidA] {
+		t.Error("untagged task must survive")
+	}
+	names, errno := readdirOf(t, homeNode)
+	if errno != 0 {
+		t.Fatalf("Readdir: %v", errno)
+	}
+	if contains(names, "+urgent") {
+		t.Error("declaration survived rmdir")
 	}
 }
 
@@ -896,8 +897,8 @@ func TestSelfVirtualTagNotListed(t *testing.T) {
 	if contains(names, ".+COMPLETED") {
 		t.Errorf("virtual-tag view lists itself: %v", names)
 	}
-	if !contains(names, ".+DUE") {
-		t.Errorf("other virtual tags still listed: %v", names)
+	if contains(names, ".+DUE") {
+		t.Errorf("virtual-tag views must not nest, or recursive walks explode: %v", names)
 	}
 }
 
@@ -990,5 +991,385 @@ func TestCanonicalKeyOrderFree(t *testing.T) {
 	b, _ = b.WithSegment("home")
 	if canonicalKey(a) != canonicalKey(b) {
 		t.Error("order-free paths must share declaration keys")
+	}
+}
+
+// sweepDB is a stateful taskwarrior fake: deletes really remove tasks
+// from the set, so sweeps, listings, and rm -rf-shaped sequences see
+// the effects of earlier gestures.
+type sweepDB struct {
+	tasks   []backend.Task
+	deleted map[string]bool
+}
+
+func newSweepFS(tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}}
+	runner := &fakeRunner{fn: db.serve}
+	fs := New(backend.NewQuery(runner))
+	fs.SetVirtualTags([]string{"COMPLETED", "PENDING", "DUE", "DELETED"})
+	return fs, runner, db
+}
+
+func (db *sweepDB) serve(args []string) ([]byte, error) {
+	switch {
+	case hasArg(args, "_tags"):
+		return []byte("COMPLETED\nPENDING\nDUE\nDELETED"), nil
+	case hasArg(args, "_unique"):
+		if hasArg(args, "project") {
+			seen := map[string]bool{}
+			var projects []string
+			for _, t := range db.match(args) {
+				if t.Project != "" && !seen[t.Project] {
+					seen[t.Project] = true
+					projects = append(projects, t.Project)
+				}
+			}
+			return []byte(strings.Join(projects, "\n")), nil
+		}
+		seen := map[string]bool{}
+		var tags []string
+		for _, t := range db.match(args) {
+			for _, tag := range t.Tags {
+				if !seen[tag] {
+					seen[tag] = true
+					tags = append(tags, tag)
+				}
+			}
+		}
+		return []byte(strings.Join(tags, "\n")), nil
+	case hasArg(args, "export"):
+		return taskJSON(db.match(args)...), nil
+	case hasArg(args, "delete"):
+		for _, a := range args {
+			if a != "rc.confirmation=off" && a != "delete" {
+				db.deleted[a] = true
+				for i, t := range db.tasks {
+					if t.UUID == a {
+						db.tasks[i].Status = "deleted"
+					}
+				}
+			}
+		}
+		return nil, nil
+	}
+	return nil, nil
+}
+
+// match emulates taskwarrior's filter semantics for the argument shapes
+// the filesystem issues: project prefixes match subprojects, uppercase
+// +NAME segments constrain status (PENDING) or are derived (DUE), and a
+// bare export with no status argument admits every status.
+func (db *sweepDB) match(args []string) []backend.Task {
+	sweep := hasArg(args, "status.not:deleted")
+	completedView := hasArg(args, "status:completed")
+	pendingView := hasArg(args, "status:pending")
+	deletedView := hasArg(args, "status:deleted")
+	allStatuses := !sweep && !completedView && !pendingView && !deletedView
+	var out []backend.Task
+	for _, t := range db.tasks {
+		if t.Status == "deleted" && !deletedView && !allStatuses {
+			continue
+		}
+		if !filterMatches(args, t, sweep, completedView, deletedView, allStatuses) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func filterMatches(args []string, t backend.Task, sweep, completedView, deletedView, allStatuses bool) bool {
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "project:"):
+			p := strings.TrimPrefix(a, "project:")
+			if t.Project != p && !strings.HasPrefix(t.Project, p+".") {
+				return false
+			}
+		case strings.HasPrefix(a, "+"):
+			tag := a[1:]
+			switch tag {
+			case "PENDING":
+				if t.Status != "pending" {
+					return false
+				}
+			case "COMPLETED", "DELETED", "DUE", "ACTIVE", "OVERDUE", "WAITING":
+			default:
+				if !contains(t.Tags, tag) {
+					return false
+				}
+			}
+		}
+	}
+	switch {
+	case allStatuses:
+		return true
+	case deletedView:
+		return t.Status == "deleted"
+	case completedView:
+		return t.Status == "completed"
+	case sweep:
+		return t.Status != "deleted"
+	default:
+		return t.Status == "pending"
+	}
+}
+
+func rmdirDeletedUUIDs(runner *fakeRunner) []string {
+	var out []string
+	for _, cmd := range runner.log {
+		if hasArg(cmd, "delete") {
+			out = append(out, cmd[len(cmd)-2])
+		}
+	}
+	return out
+}
+
+func mutationCount(runner *fakeRunner) int {
+	n := 0
+	for _, cmd := range runner.log {
+		if hasArg(cmd, "delete") || hasArg(cmd, "modify") || hasArg(cmd, "done") || hasArg(cmd, "add") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRmdirProjectDeletesSubtree(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Top task", Project: "this", Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Nested task", Project: "this.sub", Status: "pending"},
+		backend.Task{UUID: "c9d0e1f2-2222-2222-2222-222222222222", Description: "Old nested", Project: "this.sub", Status: "completed"},
+	)
+	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
+		t.Fatalf("rmdir this: %v", errno)
+	}
+	got := rmdirDeletedUUIDs(runner)
+	if len(got) != 3 {
+		t.Fatalf("deleted uuids = %v, want all three", got)
+	}
+	for _, uuid := range []string{uuidA, uuidB, "c9d0e1f2-2222-2222-2222-222222222222"} {
+		if !db.deleted[uuid] {
+			t.Errorf("task %s not deleted", uuid)
+		}
+	}
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
+	}
+	if contains(names, "this") {
+		t.Errorf("removed project still listed: %v", names)
+	}
+}
+
+func TestRmdirTagDeletesAcrossProjects(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Deep task", Project: "home.clean-garage", Tags: []string{"next"}, Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Flat task", Project: "finances", Tags: []string{"next"}, Status: "completed"},
+	)
+	if errno := fs.Rmdir(context.Background(), "+next"); errno != 0 {
+		t.Fatalf("rmdir +next: %v", errno)
+	}
+	if len(rmdirDeletedUUIDs(runner)) != 2 || !db.deleted[uuidA] || !db.deleted[uuidB] {
+		t.Errorf("tagged tasks not all deleted: %v", runner.log)
+	}
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
+	}
+	if contains(names, "+next") {
+		t.Errorf("removed tag still listed: %v", names)
+	}
+}
+
+func TestRmdirSkipsDeletedTasks(t *testing.T) {
+	deletedTask := backend.Task{UUID: uuidB, Description: "Gone", Project: "this", Status: "deleted"}
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Alive", Project: "this", Status: "pending"},
+		deletedTask,
+	)
+	db.tasks[1].Status = "deleted"
+	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
+		t.Fatalf("rmdir this: %v", errno)
+	}
+	got := rmdirDeletedUUIDs(runner)
+	if len(got) != 1 || got[0] != uuidA {
+		t.Errorf("deleted uuids = %v, want [%s]", got, uuidA)
+	}
+}
+
+func TestRmdirUnknownNameChangesNothing(t *testing.T) {
+	fs, runner, _ := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Chore", Project: "home", Status: "pending"},
+	)
+	if errno := fs.Rmdir(context.Background(), "homi"); errno != syscall.ENOENT {
+		t.Fatalf("rmdir typo: errno = %v, want ENOENT", errno)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("ENOENT rmdir issued %d mutations", n)
+	}
+}
+
+func TestRmdirTombstonedProjectSucceeds(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Alive", Project: "this", Status: "pending"},
+	)
+	db.tasks[0].Status = "deleted"
+	db.tasks = append(db.tasks, backend.Task{UUID: uuidB, Description: "Gone", Project: "this", Status: "deleted"})
+	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
+		t.Fatalf("rmdir tombstoned project: %v", errno)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("tombstoned rmdir issued %d mutations", n)
+	}
+}
+
+func TestRmdirVirtualTagViewNeedsEmptyView(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
+	)
+	thisNode, errno := fs.resolveChild("this")
+	if errno != 0 {
+		t.Fatalf("lookup this: %v", errno)
+	}
+	if errno := thisNode.(*dirNode).Rmdir(context.Background(), ".+PENDING"); errno != syscall.ENOTEMPTY {
+		t.Fatalf("rmdir view with tasks: errno = %v, want ENOTEMPTY", errno)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("non-destructive view rmdir issued %d mutations", n)
+	}
+	db.tasks[0].Status = "deleted"
+	if errno := thisNode.(*dirNode).Rmdir(context.Background(), ".+PENDING"); errno != 0 {
+		t.Errorf("rmdir emptied view: %v", errno)
+	}
+}
+
+func TestRmRfWalkThroughHiddenViews(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Do taxes", Project: "this", Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Old taxes", Project: "this", Status: "completed"},
+	)
+	thisNode, errno := fs.resolveChild("this")
+	if errno != 0 {
+		t.Fatalf("lookup this: %v", errno)
+	}
+	this := thisNode.(*dirNode)
+
+	pendingName := naming.FileName("Do taxes", uuidA)
+	if errno := this.Unlink(context.Background(), pendingName); errno != 0 {
+		t.Fatalf("unlink pending file: %v", errno)
+	}
+	if errno := this.Rmdir(context.Background(), ".+PENDING"); errno != 0 {
+		t.Fatalf("rmdir .+PENDING: %v", errno)
+	}
+
+	completedName := naming.FileName("Old taxes", uuidB)
+	completedView, errno := this.resolveChild(".+COMPLETED")
+	if errno != 0 {
+		t.Fatalf("lookup .+COMPLETED: %v", errno)
+	}
+	if errno := completedView.(*dirNode).Unlink(context.Background(), completedName); errno != 0 {
+		t.Fatalf("unlink completed file: %v", errno)
+	}
+	if errno := this.Rmdir(context.Background(), ".+COMPLETED"); errno != 0 {
+		t.Fatalf("rmdir .+COMPLETED: %v", errno)
+	}
+
+	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
+		t.Fatalf("rmdir this: %v", errno)
+	}
+	got := rmdirDeletedUUIDs(runner)
+	if len(got) != 2 || !db.deleted[uuidA] || !db.deleted[uuidB] {
+		t.Errorf("deleted uuids = %v, want both", got)
+	}
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
+	}
+	if contains(names, "this") {
+		t.Errorf("removed project still listed: %v", names)
+	}
+}
+
+func TestRmdirPurgesUnderlyingDeclarations(t *testing.T) {
+	fs, _, _ := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Chore", Project: "other", Status: "pending"},
+	)
+	if _, errno := fs.declareChild("this"); errno != 0 {
+		t.Fatalf("mkdir this: %v", errno)
+	}
+	thisNode, errno := fs.resolveChild("this")
+	if errno != 0 {
+		t.Fatalf("lookup this: %v", errno)
+	}
+	if _, errno := thisNode.(*dirNode).declareChild("ghost"); errno != 0 {
+		t.Fatalf("mkdir ghost: %v", errno)
+	}
+	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
+		t.Fatalf("rmdir this: %v", errno)
+	}
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
+	}
+	if contains(names, "this") {
+		t.Errorf("ghost declaration kept removed project listed: %v", names)
+	}
+	if _, errno := fs.resolveChild("this"); errno != syscall.ENOENT {
+		t.Errorf("resolve after purge: errno = %v, want ENOENT", errno)
+	}
+}
+
+func TestUnlinkDeletedTaskIsNoop(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Gone", Project: "home", Status: "deleted"},
+		backend.Task{UUID: uuidB, Description: "Alive", Project: "home", Status: "pending"},
+	)
+	db.tasks[0].Status = "deleted"
+	home, errno := fs.resolveChild("home")
+	if errno != 0 {
+		t.Fatalf("lookup home: %v", errno)
+	}
+	homeNode := home.(*dirNode)
+	deletedView, errno := homeNode.resolveChild(".+DELETED")
+	if errno != 0 {
+		t.Fatalf("lookup .+DELETED: %v", errno)
+	}
+	name := naming.FileName("Gone", uuidA)
+	if errno := deletedView.(*dirNode).Unlink(context.Background(), name); errno != 0 {
+		t.Fatalf("unlink tombstone: %v", errno)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("tombstone unlink issued %d mutations", n)
+	}
+}
+
+func TestRmdirDeeperProjectAndTagConjunction(t *testing.T) {
+	fs, runner, db := newSweepFS(
+		backend.Task{UUID: uuidA, Description: "Match", Project: "this.is.a.test", Tags: []string{"next"}, Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Untagged same project", Project: "this.is.a.test", Status: "pending"},
+		backend.Task{UUID: "c9d0e1f2-2222-2222-2222-222222222222", Description: "Tagged other project", Project: "home", Tags: []string{"next"}, Status: "pending"},
+		backend.Task{UUID: "d1e2f3a4-3333-3333-3333-333333333333", Description: "Tagged deeper", Project: "this.is.a.test.deep", Tags: []string{"next"}, Status: "completed"},
+	)
+	// Walk the exact path shape: this/is/a/+next, then rmdir test.
+	node := &fs.dirNode
+	for _, seg := range []string{"this", "is", "a", "+next"} {
+		child, errno := node.resolveChild(seg)
+		if errno != 0 {
+			t.Fatalf("lookup %s: %v", seg, errno)
+		}
+		node = child.(*dirNode)
+	}
+	if errno := node.Rmdir(context.Background(), "test"); errno != 0 {
+		t.Fatalf("rmdir test: %v", errno)
+	}
+	if got := rmdirDeletedUUIDs(runner); len(got) != 2 || !db.deleted[uuidA] || !db.deleted["d1e2f3a4-3333-3333-3333-333333333333"] {
+		t.Errorf("deleted uuids = %v, want exactly the tagged this.is.a.test subtree", got)
+	}
+	if db.deleted[uuidB] {
+		t.Error("untagged task in the same project must survive")
+	}
+	if db.deleted["c9d0e1f2-2222-2222-2222-222222222222"] {
+		t.Error("tagged task in another project must survive")
 	}
 }

@@ -25,14 +25,20 @@ type FS struct {
 	virtualTags []string
 
 	mu       sync.Mutex
-	declared map[string]map[string]bool
+	declared map[string]map[string]declaredSegment
+}
+
+// declaredSegment remembers the filter a mkdir declared, so removing a
+// directory can purge the declarations made under it.
+type declaredSegment struct {
+	filter backend.Filter
 }
 
 func New(query *backend.Query) *FS {
 	root := &FS{
 		dirNode:  dirNode{root: nil},
 		query:    query,
-		declared: map[string]map[string]bool{},
+		declared: map[string]map[string]declaredSegment{},
 	}
 	root.dirNode.root = root
 	return root
@@ -51,16 +57,51 @@ func (f *FS) isVirtualTag(name string) bool {
 	return false
 }
 
-func (f *FS) declare(filter backend.Filter, segment string) {
-	key := canonicalKey(filter)
+func (f *FS) declare(parent backend.Filter, segment string, child backend.Filter) {
+	key := canonicalKey(parent)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	set, ok := f.declared[key]
 	if !ok {
-		set = map[string]bool{}
+		set = map[string]declaredSegment{}
 		f.declared[key] = set
 	}
-	set[segment] = true
+	set[segment] = declaredSegment{filter: child}
+}
+
+// purgeDeclarations drops declarations made at or under a removed
+// directory: those whose project sits in the removed project subtree
+// and whose tags include the removed filter's. Without this, Readdir
+// would keep listing ghost segments of the removed subtree for the
+// rest of the mount session.
+func (f *FS) purgeDeclarations(removed backend.Filter) {
+	if removed.Project == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for key, set := range f.declared {
+		for seg, d := range set {
+			if extendsFilter(d.filter, removed) {
+				delete(set, seg)
+			}
+		}
+		if len(set) == 0 {
+			delete(f.declared, key)
+		}
+	}
+}
+
+func extendsFilter(d, base backend.Filter) bool {
+	if d.Project != base.Project && !strings.HasPrefix(d.Project, base.Project+".") {
+		return false
+	}
+	for _, t := range base.Tags {
+		if !contains(d.Tags, t) {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *FS) undeclare(filter backend.Filter, segment string) {
@@ -77,7 +118,8 @@ func (f *FS) isDeclared(filter backend.Filter, segment string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	set, ok := f.declared[key]
-	return ok && set[segment]
+	_, exists := set[segment]
+	return ok && exists
 }
 
 func (f *FS) declaredSegments(filter backend.Filter) []string {
@@ -161,11 +203,14 @@ func (n *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 		add("+"+tag, fuse.S_IFDIR)
 	}
-	for _, vt := range n.root.virtualTags {
-		if contains(n.filter.VirtualTags, vt) {
-			continue
+	// Virtual-tag views do not nest: stacking derived filters makes
+	// the tree combinatorial, and a recursive walk of a project would
+	// never finish. One derived filter per path is enough for the
+	// read-only views.
+	if len(n.filter.VirtualTags) == 0 {
+		for _, vt := range n.root.virtualTags {
+			add(".+"+vt, fuse.S_IFDIR)
 		}
-		add(".+"+vt, fuse.S_IFDIR)
 	}
 	tasks, err := n.listedTasks(n.filter)
 	if err != nil {
@@ -433,27 +478,32 @@ func (n *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if !naming.IsMintedName(name) {
 		return syscall.ENOENT
 	}
-	uuid, errno := n.resolveFileUUID(name)
+	t, errno := n.resolveFileTask(name)
 	if errno != 0 {
 		return errno
 	}
-	if err := n.root.query.Delete(uuid); err != nil {
+	// A deleted task's file only appears in the .+DELETED view; it is a
+	// tombstone, and removing it again must not re-invoke delete.
+	if t.Status == "deleted" {
+		return 0
+	}
+	if err := n.root.query.Delete(t.UUID); err != nil {
 		return syscall.EIO
 	}
 	return 0
 }
 
-func (n *dirNode) resolveFileUUID(name string) (string, syscall.Errno) {
+func (n *dirNode) resolveFileTask(name string) (backend.Task, syscall.Errno) {
 	tasks, err := n.listedTasks(n.filter)
 	if err != nil {
-		return "", syscall.EIO
+		return backend.Task{}, syscall.EIO
 	}
 	for _, t := range tasks {
 		if naming.FileName(t.Description, t.UUID) == name {
-			return t.UUID, 0
+			return t, 0
 		}
 	}
-	return "", syscall.ENOENT
+	return backend.Task{}, syscall.ENOENT
 }
 
 var _ = (fs.NodeMkdirer)((*dirNode)(nil))
@@ -481,34 +531,65 @@ func (n *dirNode) declareChild(name string) (*dirNode, syscall.Errno) {
 	if _, errno := n.resolveChild(name); errno == 0 {
 		return nil, syscall.EEXIST
 	}
-	n.root.declare(n.filter, name)
 	child, err := n.filter.WithSegment(name)
 	if err != nil {
 		return nil, syscall.EINVAL
 	}
+	n.root.declare(n.filter, name, child)
 	return &dirNode{root: n.root, filter: child}, 0
 }
 
 var _ = (fs.NodeRmdirer)((*dirNode)(nil))
 
+// Rmdir interprets removal as a deletion gesture. A virtual-tag view
+// is never destructive: it is removable only once no non-deleted task
+// matches it, which lets a recursive rm finish after unlinking the
+// task files inside. Any other resolvable or declared directory
+// deletes every matching task in its filter scope, then removes the
+// directory together with any declarations made under it.
 func (n *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	if !n.root.isDeclared(n.filter, name) {
-		if _, errno := n.resolveChild(name); errno == 0 {
+	if strings.HasPrefix(name, ".") {
+		if !strings.HasPrefix(name, ".+") || !n.root.isVirtualTag(name[2:]) {
+			return syscall.ENOENT
+		}
+		child, err := n.filter.WithSegment(name)
+		if err != nil {
+			return syscall.EINVAL
+		}
+		tasks, err := n.root.query.SweepTasks(child)
+		if err != nil {
+			return syscall.EIO
+		}
+		if len(tasks) > 0 {
 			return syscall.ENOTEMPTY
 		}
-		return syscall.ENOENT
+		return 0
 	}
 	child, err := n.filter.WithSegment(name)
 	if err != nil {
 		return syscall.EINVAL
 	}
-	tasks, err := n.root.query.Export(child)
+	if !n.root.isDeclared(n.filter, name) {
+		if _, errno := n.resolveChild(name); errno != 0 {
+			exists, err := n.root.query.HasAnyTask(child.WriteFilter())
+			if err != nil {
+				return syscall.EIO
+			}
+			if !exists {
+				return syscall.ENOENT
+			}
+		}
+	}
+	tasks, err := n.root.query.SweepTasks(child.WriteFilter())
 	if err != nil {
 		return syscall.EIO
 	}
-	if len(tasks) > 0 {
-		return syscall.ENOTEMPTY
+	for _, t := range tasks {
+		if err := n.root.query.Delete(t.UUID); err != nil {
+			return syscall.EIO
+		}
 	}
+	n.root.purgeDeclarations(child)
 	n.root.undeclare(n.filter, name)
 	return 0
 }
@@ -527,10 +608,11 @@ func (n *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return syscall.EOPNOTSUPP
 	}
 
-	uuid, errno := n.resolveFileUUID(name)
+	t, errno := n.resolveFileTask(name)
 	if errno != 0 {
 		return errno
 	}
+	uuid := t.UUID
 
 	destFilter, errno := n.destinationFilter(dst, newName)
 	if errno != 0 {
