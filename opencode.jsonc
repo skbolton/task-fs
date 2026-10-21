@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "go-fuse": {
+      "repository": "https://github.com/hanwen/go-fuse",
+      "branch": "master",
+      "description": "FUSE bindings in Golang",
+    }
+  }
+}

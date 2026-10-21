@@ -26,6 +26,21 @@
           ...
         }:
         {
+          packages.default = pkgs.buildGoModule {
+            pname = "task-fs";
+            version = "0.1.0";
+            src = ./.;
+            vendorHash = "sha256-DLY5UEeBZN/fz+qDZ+Nni9DyzIayMP5rAjQJPyK1yQc=";
+          };
+
+          devShells.default = pkgs.mkShell {
+            packages = with pkgs; [
+              openspec
+              go
+              fuse3
+              taskwarrior3
+            ];
+          };
         };
       flake = {
       };
