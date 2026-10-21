@@ -145,8 +145,14 @@ let
 
   checks = [
     {
-      cond = lib.hasInfix "mkdir -p /home/testuser/some/path" unit.Service.ExecStartPre;
-      msg = "ExecStartPre does not mkdir the ~-expanded mount path: ${unit.Service.ExecStartPre}";
+      cond = lib.any (
+        p: lib.hasInfix "fusermount3 -u /home/testuser/some/path" p && lib.hasPrefix "-" p
+      ) unit.Service.ExecStartPre;
+      msg = "ExecStartPre does not clear a stale mount best-effort: ${builtins.toJSON unit.Service.ExecStartPre}";
+    }
+    {
+      cond = lib.any (p: lib.hasInfix "mkdir -p /home/testuser/some/path" p) unit.Service.ExecStartPre;
+      msg = "ExecStartPre does not mkdir the ~-expanded mount path: ${builtins.toJSON unit.Service.ExecStartPre}";
     }
     {
       cond = lib.hasInfix "/bin/task-fs mount /home/testuser/some/path" unit.Service.ExecStart;
@@ -157,8 +163,8 @@ let
       msg = "ExecStart does not use the flake package by default: ${unit.Service.ExecStart}";
     }
     {
-      cond = lib.hasInfix "fusermount3 -u /home/testuser/some/path" unit.Service.ExecStopPost;
-      msg = "ExecStopPost does not unmount the mount path: ${unit.Service.ExecStopPost}";
+      cond = lib.hasInfix "/run/wrappers/bin/fusermount3 -u /home/testuser/some/path" unit.Service.ExecStopPost;
+      msg = "ExecStopPost does not unmount the mount path via the absolute wrapper path: ${unit.Service.ExecStopPost}";
     }
     {
       cond = lib.hasPrefix "-" unit.Service.ExecStopPost;

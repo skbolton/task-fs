@@ -84,11 +84,17 @@ in
       };
 
       Service = {
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${mountPath}";
+        # systemd resolves bare command names with the manager's PATH,
+        # not the unit's Environment, so fusermount3 must be absolute;
+        # /run/wrappers/bin carries NixOS's setuid wrapper.
+        ExecStartPre = [
+          "-/run/wrappers/bin/fusermount3 -u ${mountPath}"
+          "${pkgs.coreutils}/bin/mkdir -p ${mountPath}"
+        ];
         ExecStart = "${cfg.package}/bin/task-fs mount ${
           lib.concatStringsSep " " (cfg.automount.mountFlags ++ [ mountPath ])
         }";
-        ExecStopPost = "-fusermount3 -u ${mountPath}";
+        ExecStopPost = "-/run/wrappers/bin/fusermount3 -u ${mountPath}";
         Restart = "on-failure";
         Environment = [
           "PATH=/run/wrappers/bin:${
