@@ -146,12 +146,39 @@ func TestFilterRenderSweep(t *testing.T) {
 					t.Fatalf("WithSegment(%q): %v", seg, err)
 				}
 			}
-			got := f.RenderSweep()
+			got := f.RenderSweep(RemoveDelete)
 			if tt.name == "write filter drops virtual tags" {
-				got = f.WriteFilter().RenderSweep()
+				got = f.WriteFilter().RenderSweep(RemoveDelete)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("sweep render = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterRenderSweepComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		path []string
+		want []string
+	}{
+		{"root", nil, []string{"status.not:deleted", "status.not:completed"}},
+		{"completed view", []string{".+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted", "status.not:completed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var f Filter
+			var err error
+			for _, seg := range tt.path {
+				f, err = f.WithSegment(seg)
+				if err != nil {
+					t.Fatalf("WithSegment(%q): %v", seg, err)
+				}
+			}
+			got := f.RenderSweep(RemoveComplete)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("complete sweep render = %v, want %v", got, tt.want)
 			}
 		})
 	}

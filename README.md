@@ -49,6 +49,18 @@ task-fs mount ~/c/TaskFS --virtual-hidden
   behavior — every discovered virtual tag, hidden — is
   `--virtual-hidden --virtual-tags ALL`.
 
+A third flag selects what removing a task does:
+
+```sh
+task-fs mount ~/c/TaskFS --rm delete
+```
+
+- `--rm complete|delete` selects the action for `rm` and for removing
+  directories: `complete` (the default) completes the matching tasks, while
+  `delete` permanently deletes them. **This changes the previous default**:
+  a flagless mount now completes tasks removed with `rm` or folder deletion;
+  pass `--rm delete` to keep the old destructive behavior.
+
 TaskFS never reads Taskwarrior data files directly — every listing is an
 on-demand `task` invocation, so changes made with the CLI in another
 terminal are visible immediately.
@@ -166,9 +178,11 @@ to task annotations.
 | Gesture | Effect |
 | --- | --- |
 | `touch "Description"` | Adds a task with the current directory's project and tags. |
-| `rm <taskfile>` | Deletes the task. |
+| `rm <taskfile>` | Applies the configured `--rm` action: completes the task by default, deletes it with `--rm delete`. |
+| `rmdir <dir>` / `rm -rf <dir>` | Applies the same configured action to every task matching the directory's filter. |
 | `mv <taskfile> +COMPLETED/` | Completes the task (rest of the destination path is ignored; `.+COMPLETED/` works too). |
-| `mv <taskfile> out of +COMPLETED` | Reopens the task and applies the destination's project/tags. |
+| `mv <taskfile> +DELETED/` | Deletes the task (rest of the destination path is ignored; `.+DELETED/` works too; the view must be selected with `--virtual-tags`). |
+| `mv <taskfile> out of +COMPLETED or +DELETED` | Reopens the task and applies the destination's project/tags. |
 | `mv <taskfile> <other-dir>` | The task's project and tags match the destination: projects set exactly (moving to a parent drops the subproject), tags added or removed per the filter delta. |
 | `mv <taskfile> /new/deep/dir` (no trailing slash) | The final component is minted as a new project segment, provided the parent path exists. |
 | `mkdir +tag` or `mkdir project-segment` | Declares a namespace that no task matches yet, so a later move can land there. |
@@ -185,8 +199,9 @@ Notes:
   since those statuses are derived, not assignable.
 - `mkdir` declarations last for the mount session only; once a task lands
   there the directory exists from the task data itself.
-- `rmdir` of a declared segment fails with ENOTEMPTY while any task carries
-  it.
+- Removing a project or tag directory applies the configured action to every
+  matching task in its subtree. Removing a virtual-tag directory never changes
+  tasks; it succeeds once the view has nothing left for the action to change.
 
 ## Unmounting
 

@@ -86,9 +86,10 @@ in
       Service = {
         # systemd resolves bare command names with the manager's PATH,
         # not the unit's Environment, so fusermount3 must be absolute;
-        # /run/wrappers/bin carries NixOS's setuid wrapper.
+        # /run/wrappers/bin carries NixOS's setuid wrapper. The guard
+        # skips the unmount on a clean start, when nothing is mounted.
         ExecStartPre = [
-          "-/run/wrappers/bin/fusermount3 -u ${mountPath}"
+          "-/bin/sh -c '${pkgs.util-linux}/bin/mountpoint -q ${mountPath} && /run/wrappers/bin/fusermount3 -u ${mountPath}'"
           "${pkgs.coreutils}/bin/mkdir -p ${mountPath}"
         ];
         ExecStart = "${cfg.package}/bin/task-fs mount ${

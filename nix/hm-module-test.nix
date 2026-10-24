@@ -146,7 +146,10 @@ let
   checks = [
     {
       cond = lib.any (
-        p: lib.hasInfix "fusermount3 -u /home/testuser/some/path" p && lib.hasPrefix "-" p
+        p:
+        lib.hasPrefix "-" p
+        && lib.hasInfix "mountpoint -q /home/testuser/some/path" p
+        && lib.hasInfix "/run/wrappers/bin/fusermount3 -u /home/testuser/some/path" p
       ) unit.Service.ExecStartPre;
       msg = "ExecStartPre does not clear a stale mount best-effort: ${builtins.toJSON unit.Service.ExecStartPre}";
     }

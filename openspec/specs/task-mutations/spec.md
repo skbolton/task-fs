@@ -25,14 +25,29 @@ The system SHALL create a new Taskwarrior task when the user creates a new file 
 - **WHEN** the user runs `touch "Pick up Milk"` in `/home/+DUE`
 - **THEN** a pending task is created with project `home` and no virtual-tag constraint, and the new file appears under `/home` rather than `/home/+DUE`
 
-### Requirement: rm deletes the task
+### Requirement: rm applies the configured removal action
 
-The system SHALL invoke Taskwarrior's delete for the corresponding task when the user removes a task file with `rm`.
+The system SHALL apply the configured removal action when the user removes a task file with `rm`, resolving the task by its full UUID. With `delete` it SHALL mark the task deleted; with `complete` it SHALL mark a pending or waiting task completed. It SHALL leave a task already completed or deleted unchanged and still report success, so a recursive walk over tombstones and already-completed files converges.
 
-#### Scenario: Removing a task file
+#### Scenario: Removing a pending task under complete
 
-- **WHEN** the user runs `rm "Do taxes.a1b2c3d4.md"` in a directory listing that task
-- **THEN** the task's status becomes deleted and the file no longer appears in pending listings
+- **WHEN** the user mounts with `--rm complete` and runs `rm "Do taxes.a1b2c3d4.md"` in a directory listing that pending task
+- **THEN** the task's status becomes completed and its file no longer appears in pending listings
+
+#### Scenario: Removing a pending task under delete
+
+- **WHEN** the user mounts with `--rm delete` and removes a pending task's file
+- **THEN** the task's status becomes deleted and its file no longer appears in pending listings
+
+#### Scenario: Completed task is unchanged under complete
+
+- **WHEN** the user mounts with `--rm complete` and removes a task file listed in a `.+COMPLETED` view
+- **THEN** the task remains completed and no completion command is issued
+
+#### Scenario: Removing a deleted task's file is a no-op
+
+- **WHEN** the user removes a task file listed in a `.+DELETED` view, under either removal action
+- **THEN** the operation succeeds without invoking Taskwarrior's delete or done, and the task remains in the deleted status
 
 ### Requirement: Moving into COMPLETED completes the task
 
@@ -47,6 +62,26 @@ The system SHALL mark the task completed when the user moves its file into a sta
 
 - **WHEN** the user moves a task file from `/.+COMPLETED/` into the existing directory `/finances/`
 - **THEN** the task's status becomes pending, its project becomes `finances`, and its file appears in `/finances`
+
+
+### Requirement: Moving into DELETED deletes the task
+
+The system SHALL mark the task deleted when the user moves its file into the DELETED status virtual-tag directory — spelled `+DELETED` or, equivalently, `.+DELETED` — from a view without a status segment, ignoring the remainder of the destination path beyond the status segment. The system SHALL leave an already-deleted task unchanged and report success. Moving a task file out of DELETED reopens it under the same rule as moving out of COMPLETED.
+
+#### Scenario: Deleting by moving into DELETED
+
+- **WHEN** the user runs `mv "Do taxes.a1b2c3d4.md" /+DELETED/`
+- **THEN** the task's status becomes deleted and its file no longer appears in pending listings
+
+#### Scenario: Moving out of DELETED reopens and re-locates
+
+- **WHEN** the user moves a task file from `/.+DELETED/` into the existing directory `/finances/`
+- **THEN** the task's status becomes pending, its project becomes `finances`, and its file appears in `/finances`
+
+#### Scenario: Already-deleted task is unchanged
+
+- **WHEN** the user moves a task file from a DELETED view into another DELETED view
+- **THEN** the task remains deleted and the operation succeeds without issuing another delete
 
 ### Requirement: Mutations identify tasks by full UUID
 
@@ -99,29 +134,29 @@ The system SHALL reject filesystem operations that would modify a task in ways v
 - **WHEN** the user renames a task file within a directory (`mv "Old.a1b2c3d4.md" "New.a1b2c3d4.md"`)
 - **THEN** the operation fails with an error indicating the operation is not supported, and the task's description is unchanged
 
-### Requirement: Removing a directory deletes its tasks
+### Requirement: Removing a directory applies the configured removal action
 
-The system SHALL treat removal of a directory whose segment is not a virtual-tag segment as a deletion gesture over that directory's child filter: every matching task with a status other than deleted SHALL be resolved to its full UUID and deleted, regardless of project depth or whether the directory was declared or derived. Removal SHALL succeed for a name whose tasks are all already deleted. Removal of a name that never held a task or declaration SHALL fail with ENOENT and change no task data.
+The system SHALL treat removal of a non-virtual-tag directory as a removal gesture over its child filter: every matching task the configured action would change SHALL be completed (`complete`) or deleted (`delete`), regardless of project depth or whether the directory was declared or derived. Removal SHALL succeed when no matching task would change, including deleted tombstones and, under `complete`, already-completed tasks. An unknown name SHALL fail with ENOENT and change nothing.
 
-#### Scenario: Removing a project removes the whole subtree
+#### Scenario: Removing a project completes its pending subtree under complete
 
-- **WHEN** the user runs `rmdir this` at the root while pending tasks exist in projects `this` and `this.sub` and a completed task exists in project `this.sub`
-- **THEN** all three tasks are deleted, and `this` no longer appears in the root listing
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir this` at the root while pending tasks exist in projects `this` and `this.sub` and a completed task exists in project `this.sub`
+- **THEN** the two pending tasks become completed, the completed task is unchanged, and `this` no longer appears in the root listing
 
-#### Scenario: Removing a tag directory deletes tagged tasks across projects
+#### Scenario: Removing a project deletes its subtree under delete
 
-- **WHEN** the user runs `rmdir +next` at the root while tasks tagged `next` exist in projects `home.clean-garage` and `finances`
-- **THEN** every pending and completed task tagged `next` is deleted, and the `+next` directory no longer appears in the root listing
+- **WHEN** the user mounts with `--rm delete` and runs `rmdir this` while pending tasks exist in projects `this` and `this.sub` and a completed task exists in project `this.sub`
+- **THEN** all three tasks become deleted and `this` no longer appears in the root listing
+
+#### Scenario: Removing a tag directory completes tagged tasks under complete
+
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir +next` at the root while pending tasks tagged `next` exist in projects `home.clean-garage` and `finances`
+- **THEN** every pending task tagged `next` becomes completed, any completed task tagged `next` is unchanged, and the `+next` directory no longer appears in the root listing
 
 #### Scenario: Deleted tasks are not re-deleted
 
-- **WHEN** the user runs `rmdir this` while one pending task and one already-deleted task have project `this`
+- **WHEN** the user mounts with `--rm delete` and runs `rmdir this` while one pending task and one already-deleted task have project `this`
 - **THEN** the pending task is deleted, the already-deleted task is left in the deleted status, and the operation succeeds
-
-#### Scenario: Removing a deleted task's file is a no-op
-
-- **WHEN** the user removes a task file listed in a `.+DELETED` view
-- **THEN** the operation succeeds without invoking Taskwarrior's delete, and the task remains in the deleted status
 
 #### Scenario: Unknown name fails without changes
 

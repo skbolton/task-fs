@@ -21,18 +21,21 @@ const uuidXattr = "user.taskwarrior.uuid"
 // FS is the root of the mounted filesystem.
 type FS struct {
 	dirNode
-	query       *backend.Query
-	virtualTags []string
-	hidden      bool
+	query        *backend.Query
+	virtualTags  []string
+	hidden       bool
+	removeAction backend.RemoveAction
 
 	mu       sync.Mutex
 	declared map[string]map[string]declaredSegment
 }
 
-// Config fixes the mount-time virtual-tag selection and presentation.
+// Config fixes the mount-time virtual-tag selection, presentation,
+// and removal action.
 type Config struct {
-	VirtualTags []string
-	Hidden      bool
+	VirtualTags  []string
+	Hidden       bool
+	RemoveAction backend.RemoveAction
 }
 
 // declaredSegment remembers the filter a mkdir declared, so removing a
@@ -43,11 +46,12 @@ type declaredSegment struct {
 
 func New(query *backend.Query, cfg Config) *FS {
 	root := &FS{
-		dirNode:     dirNode{root: nil},
-		query:       query,
-		virtualTags: cfg.VirtualTags,
-		hidden:      cfg.Hidden,
-		declared:    map[string]map[string]declaredSegment{},
+		dirNode:      dirNode{root: nil},
+		query:        query,
+		virtualTags:  cfg.VirtualTags,
+		hidden:       cfg.Hidden,
+		removeAction: cfg.RemoveAction,
+		declared:     map[string]map[string]declaredSegment{},
 	}
 	root.dirNode.root = root
 	return root
@@ -501,11 +505,16 @@ func (n *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return errno
 	}
 	// A deleted task's file only appears in the .+DELETED view; it is a
-	// tombstone, and removing it again must not re-invoke delete.
+	// tombstone, and removing it again must not re-invoke delete. A
+	// completed task is likewise already done, and Taskwarrior refuses
+	// to complete it again.
 	if t.Status == "deleted" {
 		return 0
 	}
-	if err := n.root.query.Delete(t.UUID); err != nil {
+	if n.root.removeAction == backend.RemoveComplete && t.Status == "completed" {
+		return 0
+	}
+	if err := n.root.query.Remove(t.UUID, n.root.removeAction); err != nil {
 		return syscall.EIO
 	}
 	return 0
@@ -590,12 +599,12 @@ func (n *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 			}
 		}
 	}
-	tasks, err := n.root.query.SweepTasks(child.WriteFilter())
+	tasks, err := n.root.query.SweepTasks(child.WriteFilter(), n.root.removeAction)
 	if err != nil {
 		return syscall.EIO
 	}
 	for _, t := range tasks {
-		if err := n.root.query.Delete(t.UUID); err != nil {
+		if err := n.root.query.Remove(t.UUID, n.root.removeAction); err != nil {
 			return syscall.EIO
 		}
 	}
@@ -604,15 +613,15 @@ func (n *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return 0
 }
 
-// rmdirVirtualView removes a virtual-tag view without deleting
-// anything: it succeeds only once no non-deleted task matches the
-// view's filter.
+// rmdirVirtualView removes a virtual-tag view without changing tasks:
+// it succeeds only once the view holds no task the configured removal
+// action would change.
 func (n *dirNode) rmdirVirtualView(name string) syscall.Errno {
 	child, err := n.filter.WithVirtualSegment(name)
 	if err != nil {
 		return syscall.EINVAL
 	}
-	tasks, err := n.root.query.SweepTasks(child)
+	tasks, err := n.root.query.SweepTasks(child, n.root.removeAction)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -650,7 +659,11 @@ func (n *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	srcHasStatus := n.filter.HasStatus()
 	dstHasStatus := destFilter.HasStatus()
 	if dstHasStatus && !srcHasStatus {
-		if err := n.root.query.Done(uuid); err != nil {
+		action, errno := statusRemoveAction(destFilter)
+		if errno != 0 {
+			return errno
+		}
+		if err := n.root.query.Remove(uuid, action); err != nil {
 			return syscall.EIO
 		}
 		return 0
@@ -723,6 +736,32 @@ func deltaModifyArgs(src, dst backend.Filter) []string {
 		}
 	}
 	return args
+}
+
+// statusRemoveAction maps a destination's status virtual tag to the
+// gesture that enters it. A filter carrying both status tags has no
+// single meaning.
+func statusRemoveAction(f backend.Filter) (backend.RemoveAction, syscall.Errno) {
+	var action backend.RemoveAction
+	for _, vt := range f.VirtualTags {
+		var next backend.RemoveAction
+		switch vt {
+		case "COMPLETED":
+			next = backend.RemoveComplete
+		case "DELETED":
+			next = backend.RemoveDelete
+		default:
+			continue
+		}
+		if action != "" && action != next {
+			return "", syscall.ENOTSUP
+		}
+		action = next
+	}
+	if action == "" {
+		return "", syscall.ENOTSUP
+	}
+	return action, 0
 }
 
 func hasNonStatusVirtual(f backend.Filter) bool {

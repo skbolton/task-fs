@@ -14,7 +14,7 @@ import (
 	"task-fs/internal/vfs"
 )
 
-const usage = "usage: task-fs mount [--virtual-tags LIST | -t LIST] [--virtual-hidden | -H] <mountpoint>"
+const usage = "usage: task-fs mount [--virtual-tags LIST | -t LIST] [--virtual-hidden | -H] [--rm complete|delete] <mountpoint>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -28,7 +28,7 @@ func run(args []string) error {
 		return fmt.Errorf("%s", usage)
 	}
 
-	mountpoint, selection, hidden, err := parseMountFlags(args[1:])
+	mountpoint, selection, hidden, action, err := parseMountFlags(args[1:])
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func run(args []string) error {
 		}
 	}
 
-	root := vfs.New(query, vfs.Config{VirtualTags: selected, Hidden: hidden})
+	root := vfs.New(query, vfs.Config{VirtualTags: selected, Hidden: hidden, RemoveAction: action})
 	server, err := fs.Mount(mountpoint, root, &fs.Options{})
 	if err != nil {
 		return err
@@ -66,7 +66,8 @@ func run(args []string) error {
 
 // parseMountFlags parses the mount flags in any position relative to
 // the mountpoint, which the flag package alone does not support.
-func parseMountFlags(args []string) (mountpoint, selection string, hidden bool, err error) {
+func parseMountFlags(args []string) (mountpoint, selection string, hidden bool, action backend.RemoveAction, err error) {
+	var rmValue string
 	flags := flag.NewFlagSet("mount", flag.ContinueOnError)
 	flags.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	flags.StringVar(&selection, "virtual-tags", "",
@@ -74,14 +75,19 @@ func parseMountFlags(args []string) (mountpoint, selection string, hidden bool, 
 	flags.StringVar(&selection, "t", "", "shorthand for --virtual-tags")
 	flags.BoolVar(&hidden, "virtual-hidden", false, "present virtual-tag directories as hidden .+NAME entries")
 	flags.BoolVar(&hidden, "H", false, "shorthand for --virtual-hidden")
+	flags.StringVar(&rmValue, "rm", string(backend.RemoveComplete), "what removing a task does: complete or delete")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
-		return "", "", false, err
+		return "", "", false, "", err
 	}
 	rest := flags.Args()
 	if len(rest) != 1 {
-		return "", "", false, fmt.Errorf("%s", usage)
+		return "", "", false, "", fmt.Errorf("%s", usage)
 	}
-	return rest[0], selection, hidden, nil
+	action, err = backend.ParseRemoveAction(rmValue)
+	if err != nil {
+		return "", "", false, "", err
+	}
+	return rest[0], selection, hidden, action, nil
 }
 
 // reorderFlags moves flag tokens ahead of positional arguments so
@@ -89,7 +95,7 @@ func parseMountFlags(args []string) (mountpoint, selection string, hidden bool, 
 // below need their argument pulled along; everything else is position
 // independent.
 func reorderFlags(args []string) []string {
-	valueFlags := map[string]bool{"-t": true, "--virtual-tags": true}
+	valueFlags := map[string]bool{"-t": true, "--virtual-tags": true, "--rm": true}
 	var flagArgs, rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]

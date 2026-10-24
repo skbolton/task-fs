@@ -149,13 +149,16 @@ func (f Filter) Render() []string {
 	return args
 }
 
-// RenderSweep renders the filter for a deletion sweep: the same
+// RenderSweep renders the filter for a removal sweep: the same
 // criteria as Render but without the implicit status:pending default,
-// and excluding already-deleted tasks, so pending and completed work
-// both match.
-func (f Filter) RenderSweep() []string {
+// and excluding already-deleted tasks. A complete sweep also
+// excludes completed tasks, which Taskwarrior refuses to complete again.
+func (f Filter) RenderSweep(action RemoveAction) []string {
 	args := f.criteriaArgs()
 	args = append(args, "status.not:deleted")
+	if action == RemoveComplete {
+		args = append(args, "status.not:completed")
+	}
 	return args
 }
 

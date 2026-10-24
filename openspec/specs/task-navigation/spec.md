@@ -118,7 +118,7 @@ The system SHALL allow creating a `+name` directory with `mkdir` as a declaratio
 #### Scenario: Removing a declared segment that is in use
 
 - **WHEN** the user runs `rmdir +urgent` in `/home` while tasks in `home.*` carry the tag
-- **THEN** the tasks carrying `urgent` under the current filter are deleted and the declaration is removed, so `/home/+urgent` no longer appears
+- **THEN** those tasks are completed under `complete` or deleted under `delete` according to the configured removal action, and the declaration is removed, so `/home/+urgent` no longer appears
 
 ### Requirement: Virtual-tag views do not nest
 
@@ -129,19 +129,34 @@ A directory whose accumulated filter already carries a virtual-tag segment SHALL
 - **WHEN** the user lists `/this/.+PENDING`
 - **THEN** the listing contains no `.+`-prefixed entries
 
-### Requirement: Virtual-tag directories are removed only when their view is empty
+### Requirement: Virtual-tag directory removal follows the configured action
 
-The system SHALL fail removal of a virtual-tag directory (`.+NAME`) with ENOTEMPTY while any task with a status other than deleted matches the directory's filter, and SHALL succeed without deleting any task once no such task matches. The system SHALL NOT treat removal of a virtual-tag directory as a deletion gesture, because users cannot assign virtual tags to tasks directly.
+Removing a virtual-tag directory SHALL NOT change any task. Under `delete` it SHALL fail with ENOTEMPTY while any task with a status other than deleted matches the view, and succeed once none does. Under `complete` it SHALL fail only while the view holds a task that is neither completed nor deleted, and otherwise succeed, so recursive removal converges after completion moves tasks into the completed view.
 
-#### Scenario: Recursive removal of a project completes through the hidden views
+#### Scenario: Delete action keeps the view-emptiness guard
 
-- **WHEN** the user runs `rm -rf this` at the root, so each task file inside `this/.+PENDING` and `this/.+COMPLETED` is unlinked before the virtual-tag directories themselves are removed
-- **THEN** the virtual-tag directory removals succeed once their views are empty, the project's remaining matching tasks are deleted when `this` itself is removed, and no error is reported
-
-#### Scenario: Virtual-tag directory with matching tasks is not removable
-
-- **WHEN** the user runs `rmdir .+PENDING` in `/this` while pending tasks in `this.*` exist
+- **WHEN** the user mounts with `--rm delete` and runs `rmdir .+PENDING` in `/this` while pending tasks in `this.*` exist
 - **THEN** the operation fails with ENOTEMPTY and no task data changes
+
+#### Scenario: Delete action completes a recursive project removal
+
+- **WHEN** the user mounts with `--rm delete` and runs `rm -rf this` at the root, so each task file inside the project's virtual-tag views is unlinked before those directories are removed
+- **THEN** the view removals succeed once their tasks are deleted, the project's remaining matching tasks are deleted when `this` is removed, and no error is reported
+
+#### Scenario: Complete action converges with pre-existing completed tasks
+
+- **WHEN** the user mounts with `--rm complete` and runs `rm -rf this` while project `this` has pending tasks and already-completed tasks
+- **THEN** the pending tasks become completed, the completed tasks are unchanged, every virtual-tag directory removal succeeds, and no error is reported
+
+#### Scenario: Complete action still guards an actionable view
+
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir .+PENDING` in `/this` while pending tasks in `this.*` exist
+- **THEN** the operation fails with ENOTEMPTY and no task data changes
+
+#### Scenario: Complete action allows removing the completed view
+
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir .+COMPLETED` while completed tasks match the view
+- **THEN** the operation succeeds without changing any task
 
 ### Requirement: Unknown segments are not directories
 

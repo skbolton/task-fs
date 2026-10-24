@@ -26,10 +26,11 @@ func (q *Query) Export(f Filter) ([]Task, error) {
 	return ParseExport(out)
 }
 
-// SweepTasks exports every task matching the filter with a status
-// other than deleted, across statuses, for directory-level deletion.
-func (q *Query) SweepTasks(f Filter) ([]Task, error) {
-	out, err := q.run(append(f.RenderSweep(), "export"))
+// SweepTasks exports every task the removal action would change: all
+// non-deleted tasks for delete, and additionally excluding completed
+// tasks for complete, which Taskwarrior refuses to complete again.
+func (q *Query) SweepTasks(f Filter, action RemoveAction) ([]Task, error) {
+	out, err := q.run(append(f.RenderSweep(action), "export"))
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +229,18 @@ func (q *Query) Modify(uuid string, args []string) error {
 func (q *Query) Done(uuid string) error {
 	_, err := q.run([]string{confirmationOff, uuid, "done"})
 	return err
+}
+
+// Remove applies the configured removal action to one task.
+func (q *Query) Remove(uuid string, action RemoveAction) error {
+	switch action {
+	case RemoveComplete:
+		return q.Done(uuid)
+	case RemoveDelete:
+		return q.Delete(uuid)
+	default:
+		return fmt.Errorf("invalid removal action %q", action)
+	}
 }
 
 func (q *Query) CheckAvailable() error {
