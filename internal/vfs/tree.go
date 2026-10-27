@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -21,21 +23,43 @@ const uuidXattr = "user.taskwarrior.uuid"
 // FS is the root of the mounted filesystem.
 type FS struct {
 	dirNode
-	query        *backend.Query
-	virtualTags  []string
-	hidden       bool
-	removeAction backend.RemoveAction
+	query          *backend.Query
+	virtualTags    []string
+	hidden         bool
+	removeAction   backend.RemoveAction
+	viewDefs       []View
+	viewDefsByName map[string]View
+	renderView     func(context.Context, View) (string, error)
 
-	mu       sync.Mutex
-	declared map[string]map[string]declaredSegment
+	mu           sync.Mutex
+	declared     map[string]map[string]declaredSegment
+	viewRenders  map[string]*viewRender
+	viewRenderMu sync.Mutex
+}
+
+const viewRenderTTL = time.Second
+
+type viewRender struct {
+	mu     sync.Mutex
+	filter string
+	at     time.Time
+	valid  bool
+}
+
+// View is one mount-time saved filter presented as a root directory.
+type View struct {
+	Name   string
+	Filter string
 }
 
 // Config fixes the mount-time virtual-tag selection, presentation,
-// and removal action.
+// removal action, and custom view directories.
 type Config struct {
 	VirtualTags  []string
 	Hidden       bool
 	RemoveAction backend.RemoveAction
+	Views        []View
+	RenderView   func(context.Context, View) (string, error)
 }
 
 // declaredSegment remembers the filter a mkdir declared, so removing a
@@ -45,16 +69,67 @@ type declaredSegment struct {
 }
 
 func New(query *backend.Query, cfg Config) *FS {
+	viewDefs := append([]View(nil), cfg.Views...)
+	sort.Slice(viewDefs, func(i, j int) bool { return viewDefs[i].Name < viewDefs[j].Name })
+	viewDefsByName := make(map[string]View, len(viewDefs))
+	for _, q := range viewDefs {
+		viewDefsByName[q.Name] = q
+	}
 	root := &FS{
-		dirNode:      dirNode{root: nil},
-		query:        query,
-		virtualTags:  cfg.VirtualTags,
-		hidden:       cfg.Hidden,
-		removeAction: cfg.RemoveAction,
-		declared:     map[string]map[string]declaredSegment{},
+		dirNode:        dirNode{root: nil},
+		query:          query,
+		virtualTags:    cfg.VirtualTags,
+		hidden:         cfg.Hidden,
+		removeAction:   cfg.RemoveAction,
+		viewDefs:       viewDefs,
+		viewDefsByName: viewDefsByName,
+		renderView:     cfg.RenderView,
+		declared:       map[string]map[string]declaredSegment{},
+		viewRenders:    map[string]*viewRender{},
+	}
+	if root.renderView == nil {
+		root.renderView = func(_ context.Context, v View) (string, error) {
+			return v.Filter, nil
+		}
 	}
 	root.dirNode.root = root
 	return root
+}
+
+func viewEntryName(v View) string { return "@" + v.Name }
+
+func (f *FS) lookupView(entryName string) (View, bool) {
+	if !strings.HasPrefix(entryName, "@") {
+		return View{}, false
+	}
+	q, ok := f.viewDefsByName[strings.TrimPrefix(entryName, "@")]
+	return q, ok
+}
+
+func (f *FS) renderViewFilter(ctx context.Context, v View, refresh bool) (string, error) {
+	f.viewRenderMu.Lock()
+	entry := f.viewRenders[v.Name]
+	if entry == nil {
+		entry = &viewRender{}
+		f.viewRenders[v.Name] = entry
+	}
+	f.viewRenderMu.Unlock()
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if !refresh && entry.valid && time.Since(entry.at) < viewRenderTTL {
+		return entry.filter, nil
+	}
+	filter, err := f.renderView(ctx, v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "task-fs: view %q: %v\n", v.Name, err)
+		return "", err
+	}
+	entry.filter = filter
+	entry.at = time.Now()
+	entry.valid = true
+	return filter, nil
 }
 
 func (f *FS) isVirtualTag(name string) bool {
@@ -177,8 +252,12 @@ func (n *dirNode) stableAttr() fs.StableAttr {
 }
 
 func hashFilter(f backend.Filter) uint64 {
+	return hashString(canonicalKey(f))
+}
+
+func hashString(s string) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(canonicalKey(f)))
+	h.Write([]byte(s))
 	return h.Sum64()
 }
 
@@ -196,6 +275,14 @@ func (n *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 var _ = (fs.NodeReaddirer)((*dirNode)(nil))
 
 func (n *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries, errno := n.readdirEntries()
+	if errno != 0 {
+		return nil, errno
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func (n *dirNode) readdirEntries() ([]fuse.DirEntry, syscall.Errno) {
 	seen := map[string]bool{}
 	var entries []fuse.DirEntry
 	add := func(name string, mode uint32) {
@@ -243,7 +330,7 @@ func (n *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 		add(seg, fuse.S_IFDIR)
 	}
-	return fs.NewListDirStream(entries), 0
+	return entries, 0
 }
 
 // listedTasks applies the exact-placement rule: directories with a
@@ -283,6 +370,100 @@ func (n *dirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrO
 	out.Mode = fuse.S_IFDIR | 0755
 	out.Size = 0
 	out.Nlink = 1
+	return 0
+}
+
+var _ = (fs.NodeLookuper)((*FS)(nil))
+
+func (f *FS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	child, errno := f.resolveChild(name)
+	if errno != 0 {
+		return nil, errno
+	}
+	inode := f.NewInode(ctx, child, child.(stableNoder).stableAttr())
+	return inode, 0
+}
+
+func (f *FS) resolveChild(name string) (fs.InodeEmbedder, syscall.Errno) {
+	if q, ok := f.lookupView(name); ok {
+		return &viewNode{root: f, view: q}, 0
+	}
+	return f.dirNode.resolveChild(name)
+}
+
+var _ = (fs.NodeReaddirer)((*FS)(nil))
+
+func (f *FS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries := make([]fuse.DirEntry, 0, len(f.viewDefs))
+	seen := map[string]bool{}
+	for _, q := range f.viewDefs {
+		name := viewEntryName(q)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		entries = append(entries, fuse.DirEntry{Name: name, Mode: fuse.S_IFDIR})
+	}
+	normal, errno := f.dirNode.readdirEntries()
+	if errno != 0 {
+		return nil, errno
+	}
+	for _, entry := range normal {
+		if !seen[entry.Name] {
+			seen[entry.Name] = true
+			entries = append(entries, entry)
+		}
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+var _ = (fs.NodeMkdirer)((*FS)(nil))
+
+func (f *FS) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if _, ok := f.lookupView(name); ok {
+		return nil, syscall.EEXIST
+	}
+	return f.dirNode.Mkdir(ctx, name, mode, out)
+}
+
+var _ = (fs.NodeRmdirer)((*FS)(nil))
+
+func (f *FS) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if q, ok := f.lookupView(name); ok {
+		return f.rmdirView(ctx, q)
+	}
+	return f.dirNode.Rmdir(ctx, name)
+}
+
+func (f *FS) rmdirView(ctx context.Context, v View) syscall.Errno {
+	filter, err := f.renderViewFilter(ctx, v, true)
+	if err != nil {
+		return syscall.EIO
+	}
+	tasks, err := f.query.SweepQuery(filter, f.removeAction)
+	if err != nil {
+		return syscall.EIO
+	}
+	if len(tasks) > 0 {
+		return syscall.ENOTEMPTY
+	}
+	return 0
+}
+
+func (f *FS) removeTask(t backend.Task) syscall.Errno {
+	// A deleted task's file only appears in the .+DELETED view; it is a
+	// tombstone, and removing it again must not re-invoke delete. A
+	// completed task is likewise already done, and Taskwarrior refuses
+	// to complete it again.
+	if t.Status == "deleted" {
+		return 0
+	}
+	if f.removeAction == backend.RemoveComplete && t.Status == "completed" {
+		return 0
+	}
+	if err := f.query.Remove(t.UUID, f.removeAction); err != nil {
+		return syscall.EIO
+	}
 	return 0
 }
 
@@ -504,20 +685,7 @@ func (n *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if errno != 0 {
 		return errno
 	}
-	// A deleted task's file only appears in the .+DELETED view; it is a
-	// tombstone, and removing it again must not re-invoke delete. A
-	// completed task is likewise already done, and Taskwarrior refuses
-	// to complete it again.
-	if t.Status == "deleted" {
-		return 0
-	}
-	if n.root.removeAction == backend.RemoveComplete && t.Status == "completed" {
-		return 0
-	}
-	if err := n.root.query.Remove(t.UUID, n.root.removeAction); err != nil {
-		return syscall.EIO
-	}
-	return 0
+	return n.root.removeTask(t)
 }
 
 func (n *dirNode) resolveFileTask(name string) (backend.Task, syscall.Errno) {
@@ -637,6 +805,14 @@ var _ = (fs.NodeRenamer)((*dirNode)(nil))
 // reopens, and any other move applies the filter delta so the task
 // matches the destination.
 func (n *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	if _, ok := newParent.(*viewNode); ok {
+		return syscall.EACCES
+	}
+	if root, ok := newParent.(*FS); ok {
+		if _, isView := root.lookupView(newName); isView {
+			return syscall.EACCES
+		}
+	}
 	dst, ok := dirNodeOf(newParent)
 	if !ok {
 		return syscall.ENOTSUP
@@ -785,6 +961,138 @@ func dirNodeOf(node fs.InodeEmbedder) (*dirNode, bool) {
 
 func isAllUppercase(s string) bool {
 	return s == strings.ToUpper(s)
+}
+
+// viewNode is one mount-time saved filter. It is a lookup view, not a
+// filter node: its entries are task files and nothing else.
+type viewNode struct {
+	fs.Inode
+	root *FS
+	view View
+}
+
+func (n *viewNode) viewKey() string { return "view:" + n.view.Name }
+
+func (n *viewNode) stableAttr() fs.StableAttr {
+	return fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hashString(n.viewKey())}
+}
+
+func (n *viewNode) tasks(ctx context.Context, refresh bool) ([]backend.Task, error) {
+	filter, err := n.root.renderViewFilter(ctx, n.view, refresh)
+	if err != nil {
+		return nil, err
+	}
+	return n.root.query.ExportQuery(filter)
+}
+
+func (n *viewNode) resolveFileTask(ctx context.Context, name string, refresh bool) (backend.Task, syscall.Errno) {
+	tasks, err := n.tasks(ctx, refresh)
+	if err != nil {
+		return backend.Task{}, syscall.EIO
+	}
+	for _, t := range tasks {
+		if naming.FileName(t.Description, t.UUID) == name {
+			return t, 0
+		}
+	}
+	return backend.Task{}, syscall.ENOENT
+}
+
+func (n *viewNode) resolveChild(ctx context.Context, name string, refresh bool) (fs.InodeEmbedder, syscall.Errno) {
+	if !naming.IsMintedName(name) {
+		return nil, syscall.ENOENT
+	}
+	t, errno := n.resolveFileTask(ctx, name, refresh)
+	if errno != 0 {
+		return nil, errno
+	}
+	return &fileNode{root: n.root, uuid: t.UUID, viewKey: n.viewKey()}, 0
+}
+
+var _ = (fs.NodeLookuper)((*viewNode)(nil))
+
+func (n *viewNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	child, errno := n.resolveChild(ctx, name, false)
+	if errno != 0 {
+		return nil, errno
+	}
+	return n.NewInode(ctx, child, child.(stableNoder).stableAttr()), 0
+}
+
+var _ = (fs.NodeReaddirer)((*viewNode)(nil))
+
+func (n *viewNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	tasks, err := n.tasks(ctx, true)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	seen := map[string]bool{}
+	entries := make([]fuse.DirEntry, 0, len(tasks))
+	for _, t := range tasks {
+		name := naming.FileName(t.Description, t.UUID)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		entries = append(entries, fuse.DirEntry{Name: name, Mode: fuse.S_IFREG})
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+var _ = (fs.NodeGetattrer)((*viewNode)(nil))
+
+func (n *viewNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFDIR | 0755
+	out.Size = 0
+	out.Nlink = 1
+	return 0
+}
+
+var _ = (fs.NodeSetattrer)((*viewNode)(nil))
+
+func (n *viewNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if mtime, ok := in.GetMTime(); ok {
+		out.SetTimes(nil, &mtime, nil)
+	}
+	out.Mode = fuse.S_IFDIR | 0755
+	return 0
+}
+
+var _ = (fs.NodeUnlinker)((*viewNode)(nil))
+
+func (n *viewNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	if !naming.IsMintedName(name) {
+		return syscall.ENOENT
+	}
+	t, errno := n.resolveFileTask(ctx, name, true)
+	if errno != 0 {
+		return errno
+	}
+	return n.root.removeTask(t)
+}
+
+var _ = (fs.NodeCreater)((*viewNode)(nil))
+
+func (n *viewNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	return nil, nil, 0, syscall.EACCES
+}
+
+var _ = (fs.NodeMkdirer)((*viewNode)(nil))
+
+func (n *viewNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	return nil, syscall.EACCES
+}
+
+var _ = (fs.NodeRmdirer)((*viewNode)(nil))
+
+func (n *viewNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	return syscall.ENOENT
+}
+
+var _ = (fs.NodeRenamer)((*viewNode)(nil))
+
+func (n *viewNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	return syscall.EACCES
 }
 
 type stableNoder interface {

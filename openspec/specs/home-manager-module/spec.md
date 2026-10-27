@@ -82,14 +82,38 @@ The module SHALL interpret `services.task-fs.automount.path` relative to the use
 
 ### Requirement: Automount mount flags are configurable
 
-The module SHALL expose `services.task-fs.automount.mountFlags` as a list of strings, defaulting to the empty list, that are appended to the automount's `task-fs mount` command, so the user can pass mount options declaratively — for example `--virtual-tags "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"` and `--virtual-hidden`. Each list item SHALL be one command-line token.
+The module SHALL expose `services.task-fs.automount.mountFlags` as a list of strings, defaulting to the empty list, that are appended to the automount's `task-fs mount` command, so the user can pass mount options declaratively — for example `--virtual-tags "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"`, `--virtual-hidden`, and `--view "Due Next Week=status:pending sched.after:sonw sched.before:eonw"`. Each list item SHALL be one command-line token. The generated `ExecStart` SHALL quote each list item and the mount path so that an item containing spaces reaches `task-fs mount` as one argument.
 
 #### Scenario: Mount flags reach the mount command
 
 - **WHEN** the user sets `services.task-fs.automount.mountFlags = [ "--virtual-tags" "COMPLETED,DUE" "--virtual-hidden" ]` and the automount starts
 - **THEN** the mount command carries those flags, so the mounted tree exposes only the `COMPLETED` and `DUE` views as hidden `.+NAME` entries
 
+#### Scenario: Flag value containing spaces stays one argument
+
+- **WHEN** the user sets `services.task-fs.automount.mountFlags = [ "--view" "Due Next Week=status:pending sched.after:sonw sched.before:eonw" ]` and the automount starts
+- **THEN** `task-fs mount` receives the entire `--view` value as one argument and the mounted tree exposes the `@Due Next Week` custom view directory
+
 #### Scenario: Unset flags change nothing
 
 - **WHEN** `services.task-fs.automount.mountFlags` is not set
 - **THEN** the mount command is `task-fs mount <path>` with no extra flags, and the default virtual-tag selection and presentation apply
+
+### Requirement: Automount provides the dynamic view command runtime
+
+The automount service SHALL make a POSIX shell and coreutils commands available to `{{ ... }}` blocks. Commands outside that baseline SHALL be referenced by absolute path or through an executable script, and a `--view` value containing template blocks SHALL reach the mount process unchanged as one argument.
+
+#### Scenario: Coreutils command resolves in the service
+
+- **WHEN** a Home Manager user defines `--view 'Next Week=status:pending due.before:{{ date -d "+7 days" +%F }}'`
+- **THEN** the automount service can run `date` and the custom view renders successfully
+
+#### Scenario: External command script uses an absolute path
+
+- **WHEN** a dynamic view block invokes a script outside the coreutils baseline
+- **THEN** the user can reference the script by absolute Nix store path or through an executable wrapper and the block runs in the service environment
+
+#### Scenario: Template value stays one argument
+
+- **WHEN** `mountFlags` contains a `--view` value with spaces and `{{ ... }}` blocks
+- **THEN** `task-fs mount` receives the entire value as one argument with the braces unchanged

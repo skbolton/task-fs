@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -39,7 +40,7 @@ func TestRunnerReportsNonZeroExit(t *testing.T) {
 	}
 }
 
-func TestExportQueryComposition(t *testing.T) {
+func TestExportFilterComposition(t *testing.T) {
 	runner := &stubRunner{out: []byte(`[]`)}
 	q := NewQuery(runner)
 	var f Filter
@@ -51,6 +52,85 @@ func TestExportQueryComposition(t *testing.T) {
 	want := []string{"project:home", "+next", "status:pending", "export"}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Errorf("args = %v, want %v", runner.args, want)
+	}
+}
+
+func TestExportQueryComposition(t *testing.T) {
+	runner := &stubRunner{out: []byte(`[]`)}
+	q := NewQuery(runner)
+	if _, err := q.ExportQuery("status:pending sched.after:sonw sched.before:eonw"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"( status:pending sched.after:sonw sched.before:eonw )", "export"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Errorf("args = %v, want %v", runner.args, want)
+	}
+}
+
+func TestExportQueryKeepsTrailingColonTerm(t *testing.T) {
+	runner := &stubRunner{out: []byte(`[]`)}
+	q := NewQuery(runner)
+	if _, err := q.ExportQuery("status.any:"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"( status.any: )", "export"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Errorf("args = %v, want %v", runner.args, want)
+	}
+}
+
+func TestExportQueryKeepsQuotedPhrase(t *testing.T) {
+	runner := &stubRunner{out: []byte(`[]`)}
+	q := NewQuery(runner)
+	if _, err := q.ExportQuery(`description.contains:"Get proficient"`); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{`( description.contains:"Get proficient" )`, "export"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Errorf("args = %v, want %v", runner.args, want)
+	}
+}
+
+func TestExportQueryZeroMatches(t *testing.T) {
+	runner := &stubRunner{out: []byte(`[]`)}
+	q := NewQuery(runner)
+	tasks, err := q.ExportQuery("project:does-not-exist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("tasks = %+v, want none", tasks)
+	}
+}
+
+func TestExportQueryPropagatesError(t *testing.T) {
+	runner := &stubRunner{err: errors.New("bad filter")}
+	q := NewQuery(runner)
+	if _, err := q.ExportQuery("("); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSweepQueryComposition(t *testing.T) {
+	tests := []struct {
+		name   string
+		action RemoveAction
+		want   []string
+	}{
+		{"delete", RemoveDelete, []string{"( +next )", "status.not:deleted", "export"}},
+		{"complete", RemoveComplete, []string{"( +next )", "status.not:deleted", "status.not:completed", "export"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &stubRunner{out: []byte(`[]`)}
+			q := NewQuery(runner)
+			if _, err := q.SweepQuery("+next", tt.action); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.args, tt.want) {
+				t.Errorf("args = %v, want %v", runner.args, tt.want)
+			}
+		})
 	}
 }
 

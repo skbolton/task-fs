@@ -26,6 +26,31 @@ func (q *Query) Export(f Filter) ([]Task, error) {
 	return ParseExport(out)
 }
 
+// ExportQuery runs one opaque filter as a single parenthesized expression.
+// Keeping it one argument lets Taskwarrior parse the whole filter without
+// treating any term as a command.
+func (q *Query) ExportQuery(filter string) ([]Task, error) {
+	out, err := q.run([]string{"( " + filter + " )", "export"})
+	if err != nil {
+		return nil, err
+	}
+	return ParseExport(out)
+}
+
+// SweepQuery applies the removal sweep exclusions to an opaque filter.
+func (q *Query) SweepQuery(filter string, action RemoveAction) ([]Task, error) {
+	args := []string{"( " + filter + " )", "status.not:deleted"}
+	if action == RemoveComplete {
+		args = append(args, "status.not:completed")
+	}
+	args = append(args, "export")
+	out, err := q.run(args)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExport(out)
+}
+
 // SweepTasks exports every task the removal action would change: all
 // non-deleted tasks for delete, and additionally excluding completed
 // tasks for complete, which Taskwarrior refuses to complete again.

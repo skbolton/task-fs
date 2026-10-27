@@ -8,7 +8,7 @@ Owns the filesystem gestures that modify tasks through the mounted tree: creatin
 
 ### Requirement: Touching a file creates a task in the current context
 
-The system SHALL create a new Taskwarrior task when the user creates a new file whose name does not end in the filesystem's minted-name pattern, using the file name as the task description and the current directory's filter as the new task's project and tags. Creation SHALL use the write filter derived by dropping virtual-tag segments from the current filter, mirroring Taskwarrior's context write filters, since virtual tags cannot be attached to tasks.
+The system SHALL create a new Taskwarrior task when the user creates a new file in a filter directory other than a custom view directory, whose name does not end in the filesystem's minted-name pattern, using the file name as the task description and the current directory's filter as the new task's project and tags. Creation SHALL use the write filter derived by dropping virtual-tag segments from the current filter, mirroring Taskwarrior's context write filters, since virtual tags cannot be attached to tasks. Creating a file in a custom view directory SHALL fail.
 
 #### Scenario: Adding a task inside a project and tag
 
@@ -51,7 +51,7 @@ The system SHALL apply the configured removal action when the user removes a tas
 
 ### Requirement: Moving into COMPLETED completes the task
 
-The system SHALL mark the task completed when the user moves its file into a status virtual-tag directory — spelled `+COMPLETED` or, equivalently, `.+COMPLETED` — ignoring the remainder of the destination path beyond the status segment. The system SHALL reopen the task (status pending) when the user moves its file out of a status virtual-tag directory and SHALL additionally apply the destination filter delta per the match-the-destination rule.
+The system SHALL mark the task completed when the user moves its file into a status virtual-tag directory — spelled `+COMPLETED` or, equivalently, `.+COMPLETED` — from a filter directory other than a custom view directory, ignoring the remainder of the destination path beyond the status segment. The system SHALL reopen the task (status pending) when the user moves its file out of a status virtual-tag directory and SHALL additionally apply the destination filter delta per the match-the-destination rule. Moves whose source or destination is a custom view directory are rejected.
 
 #### Scenario: Completing from a project directory
 
@@ -63,10 +63,9 @@ The system SHALL mark the task completed when the user moves its file into a sta
 - **WHEN** the user moves a task file from `/.+COMPLETED/` into the existing directory `/finances/`
 - **THEN** the task's status becomes pending, its project becomes `finances`, and its file appears in `/finances`
 
-
 ### Requirement: Moving into DELETED deletes the task
 
-The system SHALL mark the task deleted when the user moves its file into the DELETED status virtual-tag directory — spelled `+DELETED` or, equivalently, `.+DELETED` — from a view without a status segment, ignoring the remainder of the destination path beyond the status segment. The system SHALL leave an already-deleted task unchanged and report success. Moving a task file out of DELETED reopens it under the same rule as moving out of COMPLETED.
+The system SHALL mark the task deleted when the user moves its file into the DELETED status virtual-tag directory — spelled `+DELETED` or, equivalently, `.+DELETED` — from a filter directory other than a custom view directory, ignoring the remainder of the destination path beyond the status segment. The system SHALL leave an already-deleted task unchanged and report success. Moving a task file out of DELETED reopens it under the same rule as moving out of COMPLETED. Moves whose source or destination is a custom view directory are rejected.
 
 #### Scenario: Deleting by moving into DELETED
 
@@ -94,7 +93,7 @@ The system SHALL resolve every mutation gesture to the task's full UUID (carried
 
 ### Requirement: Moving a task file makes the task match the destination
 
-When the user moves a task file between directories other than status virtual-tag directories, the system SHALL apply the filter delta between the source and destination: the task's project SHALL be set to the destination's full project prefix, tags present in the destination filter but not the source SHALL be added, and tags present in the source filter but not the destination SHALL be removed.
+When the user moves a task file between filter directories other than status virtual-tag directories and custom view directories, the system SHALL apply the filter delta between the source and destination: the task's project SHALL be set to the destination's full project prefix, tags present in the destination filter but not the source SHALL be added, and tags present in the source filter but not the destination SHALL be removed. Moves whose source or destination is a custom view directory are rejected.
 
 #### Scenario: Moving from an inbox project to its home
 
@@ -136,7 +135,7 @@ The system SHALL reject filesystem operations that would modify a task in ways v
 
 ### Requirement: Removing a directory applies the configured removal action
 
-The system SHALL treat removal of a non-virtual-tag directory as a removal gesture over its child filter: every matching task the configured action would change SHALL be completed (`complete`) or deleted (`delete`), regardless of project depth or whether the directory was declared or derived. Removal SHALL succeed when no matching task would change, including deleted tombstones and, under `complete`, already-completed tasks. An unknown name SHALL fail with ENOENT and change nothing.
+The system SHALL treat removal of a non-virtual-tag, non-custom view directory as a removal gesture over its child filter: every matching task the configured action would change SHALL be completed (`complete`) or deleted (`delete`), regardless of project depth or whether the directory was declared or derived. Removal SHALL succeed when no matching task would change, including deleted tombstones and, under `complete`, already-completed tasks. An unknown name SHALL fail with ENOENT and change nothing. Custom view directories follow the separate custom view directory removal rule.
 
 #### Scenario: Removing a project completes its pending subtree under complete
 
@@ -162,3 +161,85 @@ The system SHALL treat removal of a non-virtual-tag directory as a removal gestu
 
 - **WHEN** the user runs `rmdir homi` while no task and no declaration matches `homi`
 - **THEN** the operation fails with ENOENT and no task data changes
+
+### Requirement: Custom view directories reject creation and moves
+
+The system SHALL fail with a permission error and change no task when the user attempts to create a file, create a subdirectory, or move a task file into or out of a custom view directory. This SHALL include moves whose source or destination is a status virtual-tag directory. Renaming a task file inside a custom view directory SHALL also fail.
+
+#### Scenario: Touching inside a custom view directory is rejected
+
+- **WHEN** the user runs `touch "New task"` inside a custom view directory
+- **THEN** the operation fails and no task is created
+
+#### Scenario: Creating a directory inside a custom view directory is rejected
+
+- **WHEN** the user runs `mkdir +urgent` inside a custom view directory
+- **THEN** the operation fails and no declaration is created
+
+#### Scenario: Moving a task into a custom view directory is rejected
+
+- **WHEN** the user moves a task file from `/home` into a custom view directory
+- **THEN** the operation fails and the task's project and tags are unchanged
+
+#### Scenario: Moving a task out of a custom view directory is rejected
+
+- **WHEN** the user moves a task file from a custom view directory into `/home`
+- **THEN** the operation fails and the task's project and tags are unchanged
+
+#### Scenario: Moving a custom view result into a status view is rejected
+
+- **WHEN** the user moves a task file from a custom view directory into `/+COMPLETED/`
+- **THEN** the operation fails and the task's status is unchanged
+
+### Requirement: Custom view task removal applies the configured action
+
+Removing a task file in a custom view directory SHALL resolve the task against the filter rendered for that removal, apply the configured removal action, resolve the task by its full UUID, and leave a task already completed or deleted unchanged while reporting success, consistent with removal elsewhere in the tree.
+
+#### Scenario: Removing a custom view result under complete
+
+- **WHEN** the user mounts with `--rm complete` and removes a pending task's file from a custom view directory
+- **THEN** the task becomes completed and no longer appears in that custom view
+
+#### Scenario: Removing a custom view result under delete
+
+- **WHEN** the user mounts with `--rm delete` and removes a pending task's file from a custom view directory
+- **THEN** the task becomes deleted and no longer appears in that custom view
+
+#### Scenario: Already-completed custom view result is unchanged under complete
+
+- **WHEN** the user mounts with `--rm complete` and removes a completed task's file listed in a custom view directory
+- **THEN** the operation succeeds and the task remains completed
+
+#### Scenario: Render failure blocks task removal
+
+- **WHEN** a custom view command fails while the user removes a task file from that view
+- **THEN** the removal fails with EIO and no task data changes
+
+### Requirement: Custom view directory removal follows the view-emptiness rule
+
+Removing a custom view directory SHALL NOT change any task and SHALL fail with ENOTEMPTY while a task the configured removal action would change matches the custom view filter rendered for that removal. It SHALL succeed once no such task matches. The configured custom view directory SHALL remain present after a successful removal, so recursive removal converges without deleting the saved custom view.
+
+#### Scenario: Custom view directory removal is guarded under complete
+
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir "@Due Next Week"` while pending tasks match the custom view filter
+- **THEN** the operation fails with ENOTEMPTY and no task changes
+
+#### Scenario: Custom view directory removal is guarded under delete
+
+- **WHEN** the user mounts with `--rm delete` and runs `rmdir "@Due Next Week"` while any non-deleted task matches the custom view filter
+- **THEN** the operation fails with ENOTEMPTY and no task changes
+
+#### Scenario: Recursive custom view removal converges
+
+- **WHEN** the user runs `rm -rf "@Due Next Week"` and every matching task is unlinked under the configured action
+- **THEN** the directory removal succeeds, the custom view directory remains configured, and no error is reported
+
+#### Scenario: Custom view directory permits removal once no task would change
+
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir "@Completed"` while the custom view filter matches only completed tasks
+- **THEN** the operation succeeds without changing any task and the custom view directory remains visible
+
+#### Scenario: Render failure blocks directory removal
+
+- **WHEN** a custom view command fails while the user removes that custom view directory
+- **THEN** the removal fails with EIO and no task changes

@@ -106,6 +106,34 @@ let
     };
   };
 
+  viewFlagged = eval {
+    config.services.task-fs = {
+      enable = true;
+      automount = {
+        enable = true;
+        path = "~/some/path";
+        mountFlags = [
+          "--view"
+          "Due Next Week=status:pending sched.after:sonw sched.before:eonw"
+        ];
+      };
+    };
+  };
+
+  dynamicViewFlagged = eval {
+    config.services.task-fs = {
+      enable = true;
+      automount = {
+        enable = true;
+        path = "~/some/path";
+        mountFlags = [
+          "--view"
+          "Next Week=status:pending due.before:{{ date -d \"+7 days\" +%F }}"
+        ];
+      };
+    };
+  };
+
   disabled = eval { };
 
   wrapped = lib.evalModules {
@@ -188,10 +216,11 @@ let
             lib.makeBinPath [
               pkgs.taskwarrior3
               pkgs.fuse3
+              pkgs.coreutils
             ]
           }"
         ];
-      msg = "Unit PATH does not prefer the setuid wrapper and provide taskwarrior3 and fuse3";
+      msg = "Unit PATH does not prefer the setuid wrapper and provide taskwarrior3, fuse3, and coreutils";
     }
     {
       cond = lib.elem flakePackage default.config.home.packages;
@@ -216,6 +245,14 @@ let
     {
       cond = lib.hasInfix "mount --virtual-tags COMPLETED,DUE --virtual-hidden /home/testuser/some/path" flagged.config.systemd.user.services.task-fs.Service.ExecStart;
       msg = "automount.mountFlags are not passed to the mount command: ${flagged.config.systemd.user.services.task-fs.Service.ExecStart}";
+    }
+    {
+      cond = lib.hasInfix "'Due Next Week=status:pending sched.after:sonw sched.before:eonw'" viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart;
+      msg = "A mountFlags view value containing spaces is not quoted as one argument: ${viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart}";
+    }
+    {
+      cond = lib.hasInfix "'Next Week=status:pending due.before:{{ date -d \"+7 days\" +%F }}'" dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart;
+      msg = "A dynamic mountFlags view value is not quoted as one argument with braces unchanged: ${dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart}";
     }
     {
       cond = !lib.hasInfix "--virtual" unit.Service.ExecStart;
