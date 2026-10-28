@@ -16,6 +16,20 @@ When the automount starts, runtime view definitions SHALL be read from and writt
 - **WHEN** the automount service runs with `HOME=/home/me` and no `XDG_STATE_HOME`
 - **THEN** runtime views are stored under `/home/me/.local/state/task-fs/views`
 
+### Requirement: Automount PATH can include extra packages
+
+The module SHALL expose `services.task-fs.automount.extraPackages` as a list of packages, defaulting to empty, appended to the automount service PATH so commands in `{{ ... }}` blocks can be invoked by name. The default PATH SHALL continue to provide taskwarrior3, fuse3, and coreutils.
+
+#### Scenario: Extra package command resolves by name
+
+- **WHEN** the user sets `extraPackages = [ pkgs.delta.cycle ]` and a `_filter` contains `{{cycle last week --end}}`
+- **THEN** the automount service can run `cycle` and the view renders
+
+#### Scenario: Default PATH is unchanged
+
+- **WHEN** `extraPackages` is not set
+- **THEN** the service PATH contains taskwarrior3, fuse3, and coreutils only
+
 ## MODIFIED Requirements
 
 ### Requirement: Automount mount flags are configurable

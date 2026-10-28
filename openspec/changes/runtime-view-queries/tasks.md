@@ -30,6 +30,7 @@
 - [x] 4.1 Remove `--view` from `nix/home-manager.nix` examples and description, document that views are created through the mounted tree and persist under the service user's state directory, and keep the coreutils/shell baseline for `_filter` command blocks; verify the module text mentions no `--view` and the `--rm` example still describes removal semantics.
 - [x] 4.2 Remove the `viewFlagged` and `dynamicViewFlagged` cases (or replace them with a `--view`-rejection expectation) and keep the `--rm` and quoting checks in `nix/hm-module-test.nix`; verify the module check builds and no generated `ExecStart` advertises `--view`, `--virtual-tags`, or `--virtual-hidden`.
 - [x] 4.3 Confirm the automount environment exposes `HOME`/`XDG_STATE_HOME` as the user session does or document the fallback; verify the module check covers the documented state-directory resolution.
+- [x] 4.4 Add `services.task-fs.automount.extraPackages` and append it to the automount PATH; verify the module check shows an extra package in the service environment while the default PATH stays unchanged.
 
 ## 5. Integration verification
 

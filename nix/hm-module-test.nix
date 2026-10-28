@@ -105,6 +105,17 @@ let
     };
   };
 
+  extraPackaged = eval {
+    config.services.task-fs = {
+      enable = true;
+      automount = {
+        enable = true;
+        path = "~/some/path";
+        extraPackages = [ pkgs.hello ];
+      };
+    };
+  };
+
   disabled = eval { };
 
   wrapped = lib.evalModules {
@@ -235,6 +246,10 @@ let
         lib.hasInfix "XDG_STATE_HOME" default.options.services.task-fs.automount.mountFlags.description
         && lib.hasInfix "_filter" default.options.services.task-fs.automount.mountFlags.description;
       msg = "The mountFlags description does not document runtime views and their state directory";
+    }
+    {
+      cond = lib.any (entry: lib.hasInfix pkgs.hello.name entry) extraPackaged.config.systemd.user.services.task-fs.Service.Environment;
+      msg = "extraPackages are not added to the automount PATH: ${builtins.toJSON extraPackaged.config.systemd.user.services.task-fs.Service.Environment}";
     }
     {
       cond = disabled.config.home.packages == [ ] && !(disabled.config.systemd.user.services ? task-fs);

@@ -11,6 +11,7 @@ Custom views are currently fixed at mount time with repeatable `--view NAME=FILT
 - Persist view definitions on the host so they survive unmount/remount without any mount flag. The store is `$XDG_STATE_HOME/task-fs/views`, falling back to `$HOME/.local/state/task-fs/views`, with one file per view containing its filter text.
 - Read the filter from `_filter` on each view access, so edits take effect without remounting. `_filter` supports the existing `{{ command }}` template syntax, rendered per access.
 - Import `@NAME` directories already present under the mountpoint when the mount starts, so views staged outside the mount appear; newer mountpoint definitions update stored ones.
+- Expose `services.task-fs.automount.extraPackages` so commands used in `_filter` blocks can be invoked by name under Home Manager instead of embedding Nix store paths.
 - A view with no `_filter` is a no-op: `mkdir @NAME` leaves it listed but empty. Creating `_filter` (even empty, with `touch` or an editor) makes it visible, and writing a filter populates the view.
 - **BREAKING** Remove the `--view` mount option. Passing it SHALL fail the mount with a usage error; runtime `_filter` views are the only way to define a custom view.
 - Keep custom views root-only: `@NAME` directories are not views inside project, tag, virtual-tag, or view directories, and a view path does not compose with filter segments.

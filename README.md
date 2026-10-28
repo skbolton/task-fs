@@ -187,6 +187,17 @@ services.task-fs.automount.mountFlags = [
 ];
 ```
 
+Commands in `{{ ... }}` blocks run with the automount service `PATH`. Add
+packages whose executables you invoke by name:
+
+```nix
+services.task-fs.automount.extraPackages = [ pkgs.delta.cycle ];
+```
+
+That lets a `_filter` use `{{cycle last week --end}}` without an absolute Nix
+store path. Commands outside the configured `PATH` still need an absolute path
+or a wrapper script.
+
 Runtime views are created through the mounted tree rather than in the mount
 flags. Their definitions live under the automount user's state directory
 (`$XDG_STATE_HOME/task-fs/views`, or `$HOME/.local/state/task-fs/views`), so

@@ -106,6 +106,8 @@ Alternatives considered:
 - Keep `--view` as a seed for the store. Rejected by the selected behavior: runtime definitions are the single source of truth, and a second definition path would need duplicate and shadowing rules.
 - Put the store in a new top-level package. Rejected because the store's name rules and template rules are the same view vocabulary and belong together.
 
+**The Home Manager module can append packages to the filter command PATH.** `services.task-fs.automount.extraPackages` defaults to empty and is appended to the service `PATH` after taskwarrior3, fuse3, and coreutils. This lets a `_filter` keep `{{cycle last week --end}}` rather than embedding a Nix store path; the default environment is unchanged for users who do not set it. Extra packages widen the command surface only for the user who explicitly adds them.
+
 ## Risks / Trade-offs
 
 - [Breaking removal of `--view`] → Documented in the proposal, README, and usage error; the migration is one `mkdir` plus one `_filter` write per view.

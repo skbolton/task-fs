@@ -68,6 +68,18 @@ in
           through a wrapper script.
         '';
       };
+
+      extraPackages = lib.mkOption {
+        type = lib.types.listOf lib.types.package;
+        default = [ ];
+        example = lib.literalExpression "[ pkgs.delta.cycle ]";
+        description = ''
+          Packages to add to the automount service `PATH`, so commands in a
+          `{{ ... }}` block can be invoked by name. For example, adding
+          `pkgs.delta.cycle` lets a `_filter` use `{{cycle last week --end}}`.
+          The default `PATH` still provides taskwarrior3, fuse3, and coreutils.
+        '';
+      };
     };
   };
 
@@ -111,11 +123,14 @@ in
         Restart = "on-failure";
         Environment = [
           "PATH=/run/wrappers/bin:${
-            lib.makeBinPath [
-              pkgs.taskwarrior3
-              pkgs.fuse3
-              pkgs.coreutils
-            ]
+            lib.makeBinPath (
+              [
+                pkgs.taskwarrior3
+                pkgs.fuse3
+                pkgs.coreutils
+              ]
+              ++ cfg.automount.extraPackages
+            )
           }"
         ];
       };
