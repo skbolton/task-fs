@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"task-fs/internal/backend"
 	"task-fs/internal/naming"
+	"task-fs/internal/view"
 )
 
 const uuidXattr = "user.taskwarrior.uuid"
@@ -23,39 +25,49 @@ const uuidXattr = "user.taskwarrior.uuid"
 // FS is the root of the mounted filesystem.
 type FS struct {
 	dirNode
-	query          *backend.Query
-	removeAction   backend.RemoveAction
-	viewDefs       []View
-	viewDefsByName map[string]View
-	renderView     func(context.Context, View) (string, error)
+	query        *backend.Query
+	removeAction backend.RemoveAction
+	viewStore    ViewStore
+	renderFilter func(context.Context, string) (string, error)
 
-	mu           sync.Mutex
-	declared     map[string]map[string]declaredSegment
-	viewRenders  map[string]*viewRender
-	viewRenderMu sync.Mutex
+	mu              sync.Mutex
+	declared        map[string]map[string]declaredSegment
+	viewRenders     map[string]*viewRender
+	viewRenderMu    sync.Mutex
+	lastFilters     map[string]string
+	lastFilterMu    sync.Mutex
+	filterHandles   map[string]map[*filterHandle]struct{}
+	filterHandlesMu sync.Mutex
 }
 
 const viewRenderTTL = time.Second
 
+const filterFileName = view.FilterFileName
+
 type viewRender struct {
 	mu     sync.Mutex
+	source string
 	filter string
 	at     time.Time
 	valid  bool
 }
 
-// View is one mount-time saved filter presented as a root directory.
-type View struct {
-	Name   string
-	Filter string
+// ViewStore holds the persistent definitions of runtime views.
+type ViewStore interface {
+	List() ([]string, error)
+	Get(name string) (filter string, ok bool, err error)
+	HasFilter(name string) (bool, error)
+	Create(name string) error
+	Put(name, filter string) error
+	DeleteFilter(name string) error
+	Delete(name string) error
 }
 
-// Config fixes the mount-time removal action and custom view
-// directories.
+// Config fixes the mount-time removal action and runtime view store.
 type Config struct {
 	RemoveAction backend.RemoveAction
-	Views        []View
-	RenderView   func(context.Context, View) (string, error)
+	ViewStore    ViewStore
+	RenderFilter func(context.Context, string) (string, error)
 }
 
 // declaredSegment remembers the filter a mkdir declared, so removing a
@@ -65,65 +77,155 @@ type declaredSegment struct {
 }
 
 func New(query *backend.Query, cfg Config) *FS {
-	viewDefs := append([]View(nil), cfg.Views...)
-	sort.Slice(viewDefs, func(i, j int) bool { return viewDefs[i].Name < viewDefs[j].Name })
-	viewDefsByName := make(map[string]View, len(viewDefs))
-	for _, q := range viewDefs {
-		viewDefsByName[q.Name] = q
-	}
 	root := &FS{
-		dirNode:        dirNode{root: nil},
-		query:          query,
-		removeAction:   cfg.RemoveAction,
-		viewDefs:       viewDefs,
-		viewDefsByName: viewDefsByName,
-		renderView:     cfg.RenderView,
-		declared:       map[string]map[string]declaredSegment{},
-		viewRenders:    map[string]*viewRender{},
+		dirNode:       dirNode{root: nil},
+		query:         query,
+		removeAction:  cfg.RemoveAction,
+		viewStore:     cfg.ViewStore,
+		renderFilter:  cfg.RenderFilter,
+		declared:      map[string]map[string]declaredSegment{},
+		viewRenders:   map[string]*viewRender{},
+		lastFilters:   map[string]string{},
+		filterHandles: map[string]map[*filterHandle]struct{}{},
 	}
-	if root.renderView == nil {
-		root.renderView = func(_ context.Context, v View) (string, error) {
-			return v.Filter, nil
+	if root.renderFilter == nil {
+		root.renderFilter = func(_ context.Context, raw string) (string, error) {
+			return raw, nil
 		}
 	}
 	root.dirNode.root = root
 	return root
 }
 
-func viewEntryName(v View) string { return "@" + v.Name }
+func viewEntryName(name string) string { return "@" + name }
 
-func (f *FS) lookupView(entryName string) (View, bool) {
-	if !strings.HasPrefix(entryName, "@") {
-		return View{}, false
+// lookupView reports whether an entry name is a persisted view. Invalid
+// view names are not views, so they fall through to project lookup.
+func (f *FS) lookupView(entryName string) (string, bool, syscall.Errno) {
+	if f.viewStore == nil || !strings.HasPrefix(entryName, "@") {
+		return "", false, 0
 	}
-	q, ok := f.viewDefsByName[strings.TrimPrefix(entryName, "@")]
-	return q, ok
+	name := strings.TrimPrefix(entryName, "@")
+	if err := view.ValidateName(name); err != nil {
+		return "", false, 0
+	}
+	_, ok, err := f.viewStore.Get(name)
+	if err != nil {
+		return "", false, syscall.EIO
+	}
+	return name, ok, 0
 }
 
-func (f *FS) renderViewFilter(ctx context.Context, v View, refresh bool) (string, error) {
+func (f *FS) viewNames() ([]string, error) {
+	if f.viewStore == nil {
+		return nil, nil
+	}
+	return f.viewStore.List()
+}
+
+func (f *FS) invalidateViewRender(name string) {
 	f.viewRenderMu.Lock()
-	entry := f.viewRenders[v.Name]
+	delete(f.viewRenders, name)
+	f.viewRenderMu.Unlock()
+}
+
+func (f *FS) setLastFilter(name, filter string) {
+	if filter == "" {
+		return
+	}
+	f.lastFilterMu.Lock()
+	f.lastFilters[name] = filter
+	f.lastFilterMu.Unlock()
+}
+
+func (f *FS) lastFilter(name string) string {
+	f.lastFilterMu.Lock()
+	defer f.lastFilterMu.Unlock()
+	return f.lastFilters[name]
+}
+
+func (f *FS) forgetLastFilter(name string) {
+	f.lastFilterMu.Lock()
+	delete(f.lastFilters, name)
+	f.lastFilterMu.Unlock()
+}
+
+func (f *FS) registerFilterHandle(view string, handle *filterHandle) {
+	f.filterHandlesMu.Lock()
+	set := f.filterHandles[view]
+	if set == nil {
+		set = map[*filterHandle]struct{}{}
+		f.filterHandles[view] = set
+	}
+	set[handle] = struct{}{}
+	f.filterHandlesMu.Unlock()
+}
+
+func (f *FS) unregisterFilterHandle(view string, handle *filterHandle) {
+	f.filterHandlesMu.Lock()
+	if set := f.filterHandles[view]; set != nil {
+		delete(set, handle)
+		if len(set) == 0 {
+			delete(f.filterHandles, view)
+		}
+	}
+	f.filterHandlesMu.Unlock()
+}
+
+func (f *FS) resizeFilterHandles(view string, size uint64) {
+	f.filterHandlesMu.Lock()
+	handles := make([]*filterHandle, 0, len(f.filterHandles[view]))
+	for handle := range f.filterHandles[view] {
+		handles = append(handles, handle)
+	}
+	f.filterHandlesMu.Unlock()
+	for _, handle := range handles {
+		handle.mu.Lock()
+		handle.data = resizeFilter(handle.data, size)
+		handle.dirty = true
+		handle.mu.Unlock()
+	}
+}
+
+func (f *FS) renderViewFilter(ctx context.Context, name string, refresh bool) (source, filter string, err error) {
+	if f.viewStore == nil {
+		return "", "", nil
+	}
+	source, ok, err := f.viewStore.Get(name)
+	if err != nil {
+		return "", "", err
+	}
+	if !ok {
+		return "", "", nil
+	}
+	if strings.TrimSpace(source) == "" {
+		return source, "", nil
+	}
+
+	f.viewRenderMu.Lock()
+	entry := f.viewRenders[name]
 	if entry == nil {
 		entry = &viewRender{}
-		f.viewRenders[v.Name] = entry
+		f.viewRenders[name] = entry
 	}
 	f.viewRenderMu.Unlock()
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if !refresh && entry.valid && time.Since(entry.at) < viewRenderTTL {
-		return entry.filter, nil
+	if !refresh && entry.valid && entry.source == source && time.Since(entry.at) < viewRenderTTL {
+		return source, entry.filter, nil
 	}
-	filter, err := f.renderView(ctx, v)
+	filter, err = f.renderFilter(ctx, source)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "task-fs: view %q: %v\n", v.Name, err)
-		return "", err
+		fmt.Fprintf(os.Stderr, "task-fs: view %q: %v\n", name, err)
+		return source, "", err
 	}
+	entry.source = source
 	entry.filter = filter
 	entry.at = time.Now()
 	entry.valid = true
-	return filter, nil
+	return source, filter, nil
 }
 
 func (f *FS) declare(parent backend.Filter, segment string, child backend.Filter) {
@@ -237,6 +339,13 @@ func hashString(s string) uint64 {
 	return h.Sum64()
 }
 
+// setOwner reports the mount process owner so permission-aware tools
+// such as editors see writable nodes as writable.
+func setOwner(out *fuse.AttrOut) {
+	out.Uid = uint32(os.Getuid())
+	out.Gid = uint32(os.Getgid())
+}
+
 var _ = (fs.NodeLookuper)((*dirNode)(nil))
 
 func (n *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -346,6 +455,7 @@ func (n *dirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrO
 	out.Mode = fuse.S_IFDIR | 0755
 	out.Size = 0
 	out.Nlink = 1
+	setOwner(out)
 	return 0
 }
 
@@ -361,8 +471,12 @@ func (f *FS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.I
 }
 
 func (f *FS) resolveChild(name string) (fs.InodeEmbedder, syscall.Errno) {
-	if q, ok := f.lookupView(name); ok {
-		return &viewNode{root: f, view: q}, 0
+	viewName, ok, errno := f.lookupView(name)
+	if errno != 0 {
+		return nil, errno
+	}
+	if ok {
+		return &viewNode{root: f, name: viewName}, 0
 	}
 	return f.dirNode.resolveChild(name)
 }
@@ -370,10 +484,14 @@ func (f *FS) resolveChild(name string) (fs.InodeEmbedder, syscall.Errno) {
 var _ = (fs.NodeReaddirer)((*FS)(nil))
 
 func (f *FS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	entries := make([]fuse.DirEntry, 0, len(f.viewDefs))
+	names, err := f.viewNames()
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	entries := make([]fuse.DirEntry, 0, len(names))
 	seen := map[string]bool{}
-	for _, q := range f.viewDefs {
-		name := viewEntryName(q)
+	for _, viewName := range names {
+		name := viewEntryName(viewName)
 		if seen[name] {
 			continue
 		}
@@ -396,34 +514,56 @@ func (f *FS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 var _ = (fs.NodeMkdirer)((*FS)(nil))
 
 func (f *FS) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if _, ok := f.lookupView(name); ok {
-		return nil, syscall.EEXIST
+	if strings.HasPrefix(name, "@") {
+		child, errno := f.createView(name)
+		if errno != 0 {
+			return nil, errno
+		}
+		return f.NewInode(ctx, child, child.stableAttr()), 0
 	}
 	return f.dirNode.Mkdir(ctx, name, mode, out)
+}
+
+func (f *FS) createView(name string) (*viewNode, syscall.Errno) {
+	if f.viewStore == nil {
+		return nil, syscall.EIO
+	}
+	viewName := strings.TrimPrefix(name, "@")
+	if err := f.viewStore.Create(viewName); err != nil {
+		switch {
+		case errors.Is(err, view.ErrExists):
+			return nil, syscall.EEXIST
+		case errors.Is(err, view.ErrInvalidName):
+			return nil, syscall.EINVAL
+		default:
+			return nil, syscall.EIO
+		}
+	}
+	return &viewNode{root: f, name: viewName}, 0
 }
 
 var _ = (fs.NodeRmdirer)((*FS)(nil))
 
 func (f *FS) Rmdir(ctx context.Context, name string) syscall.Errno {
-	if q, ok := f.lookupView(name); ok {
-		return f.rmdirView(ctx, q)
+	viewName, ok, errno := f.lookupView(name)
+	if errno != 0 {
+		return errno
+	}
+	if ok {
+		if f.viewStore == nil {
+			return syscall.EIO
+		}
+		if err := f.viewStore.Delete(viewName); err != nil {
+			if errors.Is(err, view.ErrNotExist) {
+				return syscall.ENOENT
+			}
+			return syscall.EIO
+		}
+		f.invalidateViewRender(viewName)
+		f.forgetLastFilter(viewName)
+		return 0
 	}
 	return f.dirNode.Rmdir(ctx, name)
-}
-
-func (f *FS) rmdirView(ctx context.Context, v View) syscall.Errno {
-	filter, err := f.renderViewFilter(ctx, v, true)
-	if err != nil {
-		return syscall.EIO
-	}
-	tasks, err := f.query.SweepQuery(filter, f.removeAction)
-	if err != nil {
-		return syscall.EIO
-	}
-	if len(tasks) > 0 {
-		return syscall.ENOTEMPTY
-	}
-	return 0
 }
 
 func (f *FS) removeTask(t backend.Task) syscall.Errno {
@@ -533,6 +673,7 @@ func (n *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	out.Mode = fuse.S_IFREG | 0444
 	out.Size = 0
 	out.Nlink = 1
+	setOwner(out)
 	return 0
 }
 
@@ -564,6 +705,7 @@ func (n *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	}
 	out.Mode = fuse.S_IFREG | 0444
 	out.Size = 0
+	setOwner(out)
 	return 0
 }
 
@@ -574,6 +716,7 @@ func (n *dirNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAtt
 		out.SetTimes(nil, &mtime, nil)
 	}
 	out.Mode = fuse.S_IFDIR | 0755
+	setOwner(out)
 	return 0
 }
 
@@ -776,7 +919,9 @@ func (n *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return syscall.EACCES
 	}
 	if root, ok := newParent.(*FS); ok {
-		if _, isView := root.lookupView(newName); isView {
+		if _, isView, errno := root.lookupView(newName); errno != 0 {
+			return errno
+		} else if isView {
 			return syscall.EACCES
 		}
 	}
@@ -915,30 +1060,67 @@ func isAllUppercase(s string) bool {
 	return s == strings.ToUpper(s)
 }
 
-// viewNode is one mount-time saved filter. It is a lookup view, not a
-// filter node: its entries are task files and nothing else.
+// viewNode is one runtime saved filter. It is a lookup view, not a
+// filter node: its entries are its filter file and task files.
 type viewNode struct {
 	fs.Inode
 	root *FS
-	view View
+	name string
 }
 
-func (n *viewNode) viewKey() string { return "view:" + n.view.Name }
+func (n *viewNode) viewKey() string { return "view:" + n.name }
 
 func (n *viewNode) stableAttr() fs.StableAttr {
 	return fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hashString(n.viewKey())}
 }
 
-func (n *viewNode) tasks(ctx context.Context, refresh bool) ([]backend.Task, error) {
-	filter, err := n.root.renderViewFilter(ctx, n.view, refresh)
+func (n *viewNode) tasks(ctx context.Context, refresh bool) (source string, tasks []backend.Task, err error) {
+	source, filter, err := n.root.renderViewFilter(ctx, n.name, refresh)
+	if err != nil {
+		return source, nil, err
+	}
+	if strings.TrimSpace(source) == "" {
+		return source, nil, nil
+	}
+	n.root.setLastFilter(n.name, filter)
+	tasks, err = n.root.query.ExportQuery(filter)
+	return source, tasks, err
+}
+
+func (n *viewNode) filterExists() (bool, syscall.Errno) {
+	if n.root.viewStore == nil {
+		return false, syscall.EIO
+	}
+	hasFilter, err := n.root.viewStore.HasFilter(n.name)
+	if err != nil {
+		if errors.Is(err, view.ErrInvalidName) {
+			return false, syscall.EINVAL
+		}
+		return false, syscall.EIO
+	}
+	return hasFilter, 0
+}
+
+// tasksForRemoval keeps a recursive removal working when _filter is
+// visited before the task files it already enumerated.
+func (n *viewNode) tasksForRemoval(ctx context.Context) ([]backend.Task, error) {
+	source, filter, err := n.root.renderViewFilter(ctx, n.name, true)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(source) == "" {
+		filter = n.root.lastFilter(n.name)
+		if filter == "" {
+			return nil, nil
+		}
+	} else {
+		n.root.setLastFilter(n.name, filter)
 	}
 	return n.root.query.ExportQuery(filter)
 }
 
 func (n *viewNode) resolveFileTask(ctx context.Context, name string, refresh bool) (backend.Task, syscall.Errno) {
-	tasks, err := n.tasks(ctx, refresh)
+	_, tasks, err := n.tasks(ctx, refresh)
 	if err != nil {
 		return backend.Task{}, syscall.EIO
 	}
@@ -951,6 +1133,16 @@ func (n *viewNode) resolveFileTask(ctx context.Context, name string, refresh boo
 }
 
 func (n *viewNode) resolveChild(ctx context.Context, name string, refresh bool) (fs.InodeEmbedder, syscall.Errno) {
+	if name == filterFileName {
+		exists, errno := n.filterExists()
+		if errno != 0 {
+			return nil, errno
+		}
+		if !exists {
+			return nil, syscall.ENOENT
+		}
+		return &filterFileNode{root: n.root, view: n.name}, 0
+	}
 	if !naming.IsMintedName(name) {
 		return nil, syscall.ENOENT
 	}
@@ -974,12 +1166,20 @@ func (n *viewNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 var _ = (fs.NodeReaddirer)((*viewNode)(nil))
 
 func (n *viewNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	tasks, err := n.tasks(ctx, true)
+	hasFilter, errno := n.filterExists()
+	if errno != 0 {
+		return nil, errno
+	}
+	_, tasks, err := n.tasks(ctx, true)
 	if err != nil {
 		return nil, syscall.EIO
 	}
 	seen := map[string]bool{}
-	entries := make([]fuse.DirEntry, 0, len(tasks))
+	entries := make([]fuse.DirEntry, 0, len(tasks)+1)
+	if hasFilter {
+		seen[filterFileName] = true
+		entries = append(entries, fuse.DirEntry{Name: filterFileName, Mode: fuse.S_IFREG})
+	}
 	for _, t := range tasks {
 		name := naming.FileName(t.Description, t.UUID)
 		if seen[name] {
@@ -997,6 +1197,7 @@ func (n *viewNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	out.Mode = fuse.S_IFDIR | 0755
 	out.Size = 0
 	out.Nlink = 1
+	setOwner(out)
 	return 0
 }
 
@@ -1007,26 +1208,76 @@ func (n *viewNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 		out.SetTimes(nil, &mtime, nil)
 	}
 	out.Mode = fuse.S_IFDIR | 0755
+	setOwner(out)
 	return 0
 }
 
 var _ = (fs.NodeUnlinker)((*viewNode)(nil))
 
 func (n *viewNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	if name == filterFileName {
+		return n.clearFilter()
+	}
 	if !naming.IsMintedName(name) {
 		return syscall.ENOENT
 	}
-	t, errno := n.resolveFileTask(ctx, name, true)
-	if errno != 0 {
-		return errno
+	tasks, err := n.tasksForRemoval(ctx)
+	if err != nil {
+		return syscall.EIO
 	}
-	return n.root.removeTask(t)
+	for _, t := range tasks {
+		if naming.FileName(t.Description, t.UUID) == name {
+			return n.root.removeTask(t)
+		}
+	}
+	return syscall.ENOENT
+}
+
+func (n *viewNode) clearFilter() syscall.Errno {
+	if n.root.viewStore == nil {
+		return syscall.EIO
+	}
+	if err := n.root.viewStore.DeleteFilter(n.name); err != nil {
+		return syscall.EIO
+	}
+	n.root.invalidateViewRender(n.name)
+	return 0
 }
 
 var _ = (fs.NodeCreater)((*viewNode)(nil))
 
 func (n *viewNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	return nil, nil, 0, syscall.EACCES
+	child, handle, fuseFlags, errno := n.createFilter(ctx, name, flags)
+	if errno != 0 {
+		return nil, nil, 0, errno
+	}
+	return n.NewInode(ctx, child, child.(stableNoder).stableAttr()), handle, fuseFlags, 0
+}
+
+func (n *viewNode) createFilter(ctx context.Context, name string, flags uint32) (fs.InodeEmbedder, fs.FileHandle, uint32, syscall.Errno) {
+	if name != filterFileName {
+		return nil, nil, 0, syscall.EACCES
+	}
+	if n.root.viewStore == nil {
+		return nil, nil, 0, syscall.EIO
+	}
+	hasFilter, err := n.root.viewStore.HasFilter(n.name)
+	if err != nil {
+		return nil, nil, 0, syscall.EIO
+	}
+	if hasFilter {
+		return nil, nil, 0, syscall.EEXIST
+	}
+	if err := n.root.viewStore.Put(n.name, ""); err != nil {
+		return nil, nil, 0, syscall.EIO
+	}
+	n.root.invalidateViewRender(n.name)
+	child := &filterFileNode{root: n.root, view: n.name}
+	handle, fuseFlags, errno := child.Open(ctx, flags)
+	if errno != 0 {
+		return nil, nil, 0, errno
+	}
+	return child, handle, fuseFlags, 0
 }
 
 var _ = (fs.NodeMkdirer)((*viewNode)(nil))
@@ -1045,6 +1296,206 @@ var _ = (fs.NodeRenamer)((*viewNode)(nil))
 
 func (n *viewNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	return syscall.EACCES
+}
+
+// filterFileNode is the editable _filter definition inside a view.
+type filterFileNode struct {
+	fs.Inode
+	root *FS
+	view string
+}
+
+func (n *filterFileNode) stableAttr() fs.StableAttr {
+	return fs.StableAttr{Mode: fuse.S_IFREG, Ino: hashString("filter:" + n.view)}
+}
+
+func (n *filterFileNode) current() (string, bool, syscall.Errno) {
+	if n.root.viewStore == nil {
+		return "", false, syscall.EIO
+	}
+	filter, ok, err := n.root.viewStore.Get(n.view)
+	if err != nil {
+		return "", false, syscall.EIO
+	}
+	if !ok {
+		return "", false, syscall.ENOENT
+	}
+	return filter, true, 0
+}
+
+var _ = (fs.NodeGetattrer)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	size := 0
+	if handle, ok := fh.(*filterHandle); ok {
+		handle.mu.Lock()
+		size = len(handle.data)
+		handle.mu.Unlock()
+	} else {
+		filter, _, errno := n.current()
+		if errno != 0 {
+			return errno
+		}
+		size = len(filter)
+	}
+	out.Mode = fuse.S_IFREG | 0644
+	out.Size = uint64(size)
+	out.Nlink = 1
+	setOwner(out)
+	return 0
+}
+
+var _ = (fs.NodeOpener)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	filter, _, errno := n.current()
+	if errno != 0 {
+		return nil, 0, errno
+	}
+	handle := &filterHandle{data: []byte(filter), appendMode: flags&syscall.O_APPEND != 0}
+	if flags&syscall.O_TRUNC != 0 {
+		handle.data = nil
+		handle.dirty = true
+	}
+	n.root.registerFilterHandle(n.view, handle)
+	return handle, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+var _ = (fs.NodeReader)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	var data []byte
+	if handle, ok := fh.(*filterHandle); ok {
+		handle.mu.Lock()
+		data = append([]byte(nil), handle.data...)
+		handle.mu.Unlock()
+	} else {
+		filter, _, errno := n.current()
+		if errno != 0 {
+			return nil, errno
+		}
+		data = []byte(filter)
+	}
+	if off < 0 {
+		off = 0
+	}
+	if off >= int64(len(data)) {
+		return fuse.ReadResultData(dest[:0]), 0
+	}
+	end := int(off) + len(dest)
+	if end > len(data) {
+		end = len(data)
+	}
+	return fuse.ReadResultData(data[off:end]), 0
+}
+
+var _ = (fs.NodeWriter)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
+	handle, ok := fh.(*filterHandle)
+	if !ok {
+		return 0, syscall.EIO
+	}
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if handle.appendMode {
+		off = int64(len(handle.data))
+	}
+	if off < 0 {
+		return 0, syscall.EINVAL
+	}
+	end := off + int64(len(data))
+	if end > int64(len(handle.data)) {
+		grown := make([]byte, end)
+		copy(grown, handle.data)
+		handle.data = grown
+	}
+	copy(handle.data[off:end], data)
+	handle.dirty = true
+	return uint32(len(data)), 0
+}
+
+var _ = (fs.NodeFlusher)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	return n.persist(fh)
+}
+
+var _ = (fs.NodeFsyncer)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
+	return n.persist(fh)
+}
+
+var _ = (fs.NodeReleaser)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	errno := n.persist(fh)
+	if handle, ok := fh.(*filterHandle); ok {
+		n.root.unregisterFilterHandle(n.view, handle)
+	}
+	return errno
+}
+
+func (n *filterFileNode) persist(fh fs.FileHandle) syscall.Errno {
+	handle, ok := fh.(*filterHandle)
+	if !ok || !handle.dirty {
+		return 0
+	}
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if n.root.viewStore == nil {
+		return syscall.EIO
+	}
+	if err := n.root.viewStore.Put(n.view, string(handle.data)); err != nil {
+		return syscall.EIO
+	}
+	handle.dirty = false
+	n.root.invalidateViewRender(n.view)
+	return 0
+}
+
+var _ = (fs.NodeSetattrer)((*filterFileNode)(nil))
+
+func (n *filterFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if size, ok := in.GetSize(); ok {
+		filter, _, errno := n.current()
+		if errno != 0 {
+			return errno
+		}
+		if err := n.root.viewStore.Put(n.view, string(resizeFilter([]byte(filter), size))); err != nil {
+			return syscall.EIO
+		}
+		n.root.resizeFilterHandles(n.view, size)
+		n.root.invalidateViewRender(n.view)
+	}
+	if mtime, ok := in.GetMTime(); ok {
+		out.SetTimes(nil, &mtime, nil)
+	}
+	out.Mode = fuse.S_IFREG | 0644
+	if handle, ok := fh.(*filterHandle); ok {
+		handle.mu.Lock()
+		out.Size = uint64(len(handle.data))
+		handle.mu.Unlock()
+	}
+	setOwner(out)
+	return 0
+}
+
+func resizeFilter(data []byte, size uint64) []byte {
+	if size <= uint64(len(data)) {
+		return data[:size]
+	}
+	grown := make([]byte, size)
+	copy(grown, data)
+	return grown
+}
+
+type filterHandle struct {
+	mu         sync.Mutex
+	data       []byte
+	dirty      bool
+	appendMode bool
 }
 
 type stableNoder interface {

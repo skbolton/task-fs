@@ -105,34 +105,6 @@ let
     };
   };
 
-  viewFlagged = eval {
-    config.services.task-fs = {
-      enable = true;
-      automount = {
-        enable = true;
-        path = "~/some/path";
-        mountFlags = [
-          "--view"
-          "Due Next Week=status:pending sched.after:sonw sched.before:eonw"
-        ];
-      };
-    };
-  };
-
-  dynamicViewFlagged = eval {
-    config.services.task-fs = {
-      enable = true;
-      automount = {
-        enable = true;
-        path = "~/some/path";
-        mountFlags = [
-          "--view"
-          "Next Week=status:pending due.before:{{ date -d \"+7 days\" +%F }}"
-        ];
-      };
-    };
-  };
-
   disabled = eval { };
 
   wrapped = lib.evalModules {
@@ -246,26 +218,23 @@ let
       msg = "automount.mountFlags are not passed to the mount command: ${flagged.config.systemd.user.services.task-fs.Service.ExecStart}";
     }
     {
-      cond = lib.hasInfix "'Due Next Week=status:pending sched.after:sonw sched.before:eonw'" viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart;
-      msg = "A mountFlags view value containing spaces is not quoted as one argument: ${viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart}";
-    }
-    {
-      cond = lib.hasInfix "'Next Week=status:pending due.before:{{ date -d \"+7 days\" +%F }}'" dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart;
-      msg = "A dynamic mountFlags view value is not quoted as one argument with braces unchanged: ${dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart}";
-    }
-    {
       cond = lib.all (
         start:
-        !lib.hasInfix "--virtual-tags" start
+        !lib.hasInfix "--view" start
+        && !lib.hasInfix "--virtual-tags" start
         && !lib.hasInfix "--virtual-hidden" start
         && !lib.hasInfix "-H " start
       ) [
         unit.Service.ExecStart
         flagged.config.systemd.user.services.task-fs.Service.ExecStart
-        viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart
-        dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart
       ];
-      msg = "A mount command advertises the removed virtual-tag flags";
+      msg = "A mount command advertises a removed view or virtual-tag flag";
+    }
+    {
+      cond =
+        lib.hasInfix "XDG_STATE_HOME" default.options.services.task-fs.automount.mountFlags.description
+        && lib.hasInfix "_filter" default.options.services.task-fs.automount.mountFlags.description;
+      msg = "The mountFlags description does not document runtime views and their state directory";
     }
     {
       cond = disabled.config.home.packages == [ ] && !(disabled.config.systemd.user.services ? task-fs);

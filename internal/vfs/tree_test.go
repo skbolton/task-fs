@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"task-fs/internal/backend"
 	"task-fs/internal/naming"
+	"task-fs/internal/view"
 )
 
 type fakeRunner struct {
@@ -405,7 +407,7 @@ func TestUnlinkDeletesByFullUUID(t *testing.T) {
 }
 
 func TestUnlinkCompleteCompletesTask(t *testing.T) {
-	fs, runner, db := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, db := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Do taxes", Status: "pending"},
 	)
 	name := naming.FileName("Do taxes", uuidA)
@@ -425,7 +427,7 @@ func TestUnlinkCompleteCompletesTask(t *testing.T) {
 }
 
 func TestUnlinkCompletedTaskIsNoopUnderComplete(t *testing.T) {
-	fs, runner, _ := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, _ := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Finished", Project: "home", Status: "completed"},
 	)
 	completed, errno := fs.resolveChild("+COMPLETED")
@@ -727,7 +729,7 @@ func TestMkdirDeclarations(t *testing.T) {
 }
 
 func TestRmdirDeclaredInUseDeletesTasks(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "home", Tags: []string{"next"}, Status: "pending"},
 	)
 	home, errno := fs.resolveChild("home")
@@ -1120,18 +1122,47 @@ type sweepDB struct {
 	completed map[string]bool
 }
 
-func newSweepFS(tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
-	return newSweepFSWithAction(backend.RemoveDelete, tasks...)
+func newSweepFS(t *testing.T, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	t.Helper()
+	return newSweepFSWithAction(t, backend.RemoveDelete, tasks...)
 }
 
-func newSweepFSWithAction(action backend.RemoveAction, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
-	return newSweepFSWithViews(action, nil, tasks...)
+func newSweepFSWithAction(t *testing.T, action backend.RemoveAction, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	t.Helper()
+	return newSweepFSWithViews(t, action, nil, tasks...)
 }
 
-func newSweepFSWithViews(action backend.RemoveAction, views []View, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+type testView struct {
+	Name   string
+	Filter string
+}
+
+func newViewStore(t *testing.T) *view.Store {
+	t.Helper()
+	store, err := view.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	return store
+}
+
+func newSweepFSWithViews(t *testing.T, action backend.RemoveAction, views []testView, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	t.Helper()
+	store := newViewStore(t)
+	for _, v := range views {
+		if v.Filter == "" {
+			if err := store.Create(v.Name); err != nil {
+				t.Fatalf("seed view %q: %v", v.Name, err)
+			}
+			continue
+		}
+		if err := store.Put(v.Name, v.Filter); err != nil {
+			t.Fatalf("seed view %q: %v", v.Name, err)
+		}
+	}
 	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
 	runner := &fakeRunner{fn: db.serve}
-	fs := New(backend.NewQuery(runner), Config{RemoveAction: action, Views: views})
+	fs := New(backend.NewQuery(runner), Config{RemoveAction: action, ViewStore: store})
 	return fs, runner, db
 }
 
@@ -1311,7 +1342,7 @@ func mutationCount(runner *fakeRunner) int {
 }
 
 func TestRmdirProjectDeletesSubtree(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Top task", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Nested task", Project: "this.sub", Status: "pending"},
 		backend.Task{UUID: "c9d0e1f2-2222-2222-2222-222222222222", Description: "Old nested", Project: "this.sub", Status: "completed"},
@@ -1338,7 +1369,7 @@ func TestRmdirProjectDeletesSubtree(t *testing.T) {
 }
 
 func TestRmdirProjectCompletesSubtreeUnderComplete(t *testing.T) {
-	fs, runner, db := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, db := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Top task", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Nested task", Project: "this.sub", Status: "pending"},
 		backend.Task{UUID: "c9d0e1f2-2222-2222-2222-222222222222", Description: "Old nested", Project: "this.sub", Status: "completed"},
@@ -1366,7 +1397,7 @@ func TestRmdirProjectCompletesSubtreeUnderComplete(t *testing.T) {
 }
 
 func TestRmdirTagCompletesAcrossProjectsUnderComplete(t *testing.T) {
-	fs, runner, db := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, db := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Deep task", Project: "home.clean-garage", Tags: []string{"next"}, Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Flat task", Project: "finances", Tags: []string{"next"}, Status: "completed"},
 	)
@@ -1389,7 +1420,7 @@ func TestRmdirTagCompletesAcrossProjectsUnderComplete(t *testing.T) {
 }
 
 func TestRmdirTagDeletesAcrossProjects(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Deep task", Project: "home.clean-garage", Tags: []string{"next"}, Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Flat task", Project: "finances", Tags: []string{"next"}, Status: "completed"},
 	)
@@ -1410,7 +1441,7 @@ func TestRmdirTagDeletesAcrossProjects(t *testing.T) {
 
 func TestRmdirSkipsDeletedTasks(t *testing.T) {
 	deletedTask := backend.Task{UUID: uuidB, Description: "Gone", Project: "this", Status: "deleted"}
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Alive", Project: "this", Status: "pending"},
 		deletedTask,
 	)
@@ -1425,7 +1456,7 @@ func TestRmdirSkipsDeletedTasks(t *testing.T) {
 }
 
 func TestRmdirUnknownNameChangesNothing(t *testing.T) {
-	fs, runner, _ := newSweepFS(
+	fs, runner, _ := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "home", Status: "pending"},
 	)
 	if errno := fs.Rmdir(context.Background(), "homi"); errno != syscall.ENOENT {
@@ -1437,7 +1468,7 @@ func TestRmdirUnknownNameChangesNothing(t *testing.T) {
 }
 
 func TestRmdirTombstonedProjectSucceeds(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Alive", Project: "this", Status: "pending"},
 	)
 	db.tasks[0].Status = "deleted"
@@ -1451,7 +1482,7 @@ func TestRmdirTombstonedProjectSucceeds(t *testing.T) {
 }
 
 func TestRmdirVirtualTagViewNeedsEmptyView(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old chore", Project: "this", Status: "completed"},
 	)
@@ -1472,7 +1503,7 @@ func TestRmdirVirtualTagViewNeedsEmptyView(t *testing.T) {
 }
 
 func TestRmdirDotVirtualTagViewIsENOENT(t *testing.T) {
-	fs, runner, _ := newSweepFS(
+	fs, runner, _ := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old chore", Project: "this", Status: "completed"},
 	)
@@ -1489,7 +1520,7 @@ func TestRmdirDotVirtualTagViewIsENOENT(t *testing.T) {
 }
 
 func TestRmRfWalkThroughStatusViews(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Do taxes", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old taxes", Project: "this", Status: "completed"},
 	)
@@ -1539,7 +1570,7 @@ func TestRmRfWalkThroughStatusViews(t *testing.T) {
 }
 
 func TestRmdirVirtualTagViewUnderComplete(t *testing.T) {
-	fs, runner, _ := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, _ := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old chore", Project: "this", Status: "completed"},
 	)
@@ -1561,7 +1592,7 @@ func TestRmdirVirtualTagViewUnderComplete(t *testing.T) {
 }
 
 func TestRmRfWalkThroughStatusViewsUnderComplete(t *testing.T) {
-	fs, runner, db := newSweepFSWithAction(backend.RemoveComplete,
+	fs, runner, db := newSweepFSWithAction(t, backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Do taxes", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old taxes", Project: "this", Status: "completed"},
 	)
@@ -1614,7 +1645,7 @@ func TestRmRfWalkThroughStatusViewsUnderComplete(t *testing.T) {
 }
 
 func TestRmdirPurgesUnderlyingDeclarations(t *testing.T) {
-	fs, _, _ := newSweepFS(
+	fs, _, _ := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "other", Status: "pending"},
 	)
 	if _, errno := fs.declareChild("this"); errno != 0 {
@@ -1645,7 +1676,7 @@ func TestRmdirPurgesUnderlyingDeclarations(t *testing.T) {
 func TestUnlinkDeletedTaskIsNoop(t *testing.T) {
 	for _, action := range []backend.RemoveAction{backend.RemoveDelete, backend.RemoveComplete} {
 		t.Run(string(action), func(t *testing.T) {
-			fs, runner, db := newSweepFSWithAction(action,
+			fs, runner, db := newSweepFSWithAction(t, action,
 				backend.Task{UUID: uuidA, Description: "Gone", Project: "home", Status: "deleted"},
 				backend.Task{UUID: uuidB, Description: "Alive", Project: "home", Status: "pending"},
 			)
@@ -1671,7 +1702,7 @@ func TestUnlinkDeletedTaskIsNoop(t *testing.T) {
 }
 
 func TestRmdirDeeperProjectAndTagConjunction(t *testing.T) {
-	fs, runner, db := newSweepFS(
+	fs, runner, db := newSweepFS(t,
 		backend.Task{UUID: uuidA, Description: "Match", Project: "this.is.a.test", Tags: []string{"next"}, Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Untagged same project", Project: "this.is.a.test", Status: "pending"},
 		backend.Task{UUID: "c9d0e1f2-2222-2222-2222-222222222222", Description: "Tagged other project", Project: "home", Tags: []string{"next"}, Status: "pending"},
@@ -1723,8 +1754,8 @@ func readdirViewOf(t *testing.T, n *viewNode) []string {
 }
 
 func TestRootListsConfiguredViews(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete,
-		[]View{{Name: "Zulu", Filter: "status:any:"}, {Name: "Next", Filter: "+next"}},
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete,
+		[]testView{{Name: "Zulu", Filter: "status:any:"}, {Name: "Next", Filter: "+next"}},
 		task(uuidA, "Chore", "home", "next"),
 	)
 
@@ -1752,13 +1783,13 @@ func TestRootListsConfiguredViews(t *testing.T) {
 		}
 	}
 
-	emptyFS, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Empty", Filter: "project:missing"}})
+	emptyFS, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Empty", Filter: "project:missing"}})
 	if names := readdirOfRoot(t, emptyFS); !contains(names, "@Empty") {
 		t.Errorf("empty custom view missing from root: %v", names)
 	}
 	emptyNode := resolveViewNode(t, emptyFS, "@Empty")
-	if names := readdirViewOf(t, emptyNode); len(names) != 0 {
-		t.Errorf("empty custom view listed tasks: %v", names)
+	if names := readdirViewOf(t, emptyNode); len(names) != 1 || names[0] != filterFileName {
+		t.Errorf("empty custom view = %v, want only %q", names, filterFileName)
 	}
 }
 
@@ -1771,13 +1802,18 @@ func readdirOfRoot(t *testing.T, fs *FS) []string {
 	return readdirNames(t, stream)
 }
 
-func newDynamicViewFS(action backend.RemoveAction, render func(context.Context, View) (string, error), tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+func newDynamicViewFS(t *testing.T, action backend.RemoveAction, render func(context.Context, string) (string, error), tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	t.Helper()
+	store := newViewStore(t)
+	if err := store.Put("Dynamic", "unused"); err != nil {
+		t.Fatalf("seed dynamic view: %v", err)
+	}
 	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
 	runner := &fakeRunner{fn: db.serve}
 	f := New(backend.NewQuery(runner), Config{
 		RemoveAction: action,
-		Views:        []View{{Name: "Dynamic", Filter: "unused"}},
-		RenderView:   render,
+		ViewStore:    store,
+		RenderFilter: render,
 	})
 	return f, runner, db
 }
@@ -1786,7 +1822,7 @@ func TestDynamicViewUsesRenderedFilter(t *testing.T) {
 	filter := "project:home"
 	home := task(uuidA, "Home task", "home")
 	finances := task(uuidB, "Finance task", "finances")
-	fs, _, _ := newDynamicViewFS(backend.RemoveDelete, func(context.Context, View) (string, error) {
+	fs, _, _ := newDynamicViewFS(t, backend.RemoveDelete, func(context.Context, string) (string, error) {
 		return filter, nil
 	}, home, finances)
 
@@ -1813,7 +1849,7 @@ func TestDynamicViewUsesRenderedFilter(t *testing.T) {
 func TestDynamicViewReusesRenderWithinTraversal(t *testing.T) {
 	calls := 0
 	home := task(uuidA, "Home task", "home")
-	fs, _, _ := newDynamicViewFS(backend.RemoveDelete, func(context.Context, View) (string, error) {
+	fs, _, _ := newDynamicViewFS(t, backend.RemoveDelete, func(context.Context, string) (string, error) {
 		calls++
 		return "project:home", nil
 	}, home)
@@ -1841,7 +1877,7 @@ func TestDynamicViewReusesRenderWithinTraversal(t *testing.T) {
 func TestDynamicViewForcesFreshRenderForRemoval(t *testing.T) {
 	filter := "project:home"
 	home := task(uuidA, "Home task", "home")
-	fs, runner, _ := newDynamicViewFS(backend.RemoveDelete, func(context.Context, View) (string, error) {
+	fs, runner, _ := newDynamicViewFS(t, backend.RemoveDelete, func(context.Context, string) (string, error) {
 		return filter, nil
 	}, home)
 	vn := resolveViewNode(t, fs, "@Dynamic")
@@ -1856,12 +1892,11 @@ func TestDynamicViewForcesFreshRenderForRemoval(t *testing.T) {
 	}
 
 	filter = "project:home"
-	if errno := fs.Rmdir(context.Background(), "@Dynamic"); errno != syscall.ENOTEMPTY {
-		t.Errorf("rmdir matching view: errno = %v, want ENOTEMPTY", errno)
-	}
-	filter = "project:none"
 	if errno := fs.Rmdir(context.Background(), "@Dynamic"); errno != 0 {
-		t.Errorf("rmdir empty view: %v", errno)
+		t.Errorf("rmdir custom view: %v", errno)
+	}
+	if names := readdirOfRoot(t, fs); contains(names, "@Dynamic") {
+		t.Errorf("custom view remained after rmdir: %v", names)
 	}
 	if n := mutationCount(runner); n != 0 {
 		t.Errorf("render-only changes issued %d mutations", n)
@@ -1870,7 +1905,7 @@ func TestDynamicViewForcesFreshRenderForRemoval(t *testing.T) {
 
 func TestDynamicViewRenderFailureReturnsEIO(t *testing.T) {
 	home := task(uuidA, "Home task", "home")
-	fs, runner, _ := newDynamicViewFS(backend.RemoveDelete, func(context.Context, View) (string, error) {
+	fs, runner, _ := newDynamicViewFS(t, backend.RemoveDelete, func(context.Context, string) (string, error) {
 		return "", errors.New("boom")
 	}, home)
 	vn := resolveViewNode(t, fs, "@Dynamic")
@@ -1885,8 +1920,8 @@ func TestDynamicViewRenderFailureReturnsEIO(t *testing.T) {
 	if errno := vn.Unlink(context.Background(), name); errno != syscall.EIO {
 		t.Errorf("Unlink: errno = %v, want EIO", errno)
 	}
-	if errno := fs.Rmdir(context.Background(), "@Dynamic"); errno != syscall.EIO {
-		t.Errorf("Rmdir: errno = %v, want EIO", errno)
+	if errno := fs.Rmdir(context.Background(), "@Dynamic"); errno != 0 {
+		t.Errorf("Rmdir should delete the definition without rendering: %v", errno)
 	}
 	if n := mutationCount(runner); n != 0 {
 		t.Errorf("render failures issued %d mutations", n)
@@ -1894,7 +1929,7 @@ func TestDynamicViewRenderFailureReturnsEIO(t *testing.T) {
 }
 
 func TestCustomViewDirectoryIsLookupOnly(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Next", Filter: "+next"}},
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Next", Filter: "+next"}},
 		task(uuidA, "Deep task", "home.clean-garage", "next"),
 		task(uuidB, "Flat task", "", "next"),
 		task("c9d0e1f2-2222-2222-2222-222222222222", "Other task", "home"),
@@ -1927,7 +1962,7 @@ func TestCustomViewDirectoryIsLookupOnly(t *testing.T) {
 }
 
 func TestCustomViewKeepsExactStatusSemantics(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "All", Filter: "status.any:"}},
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "All", Filter: "status.any:"}},
 		task(uuidA, "Pending task", "home"),
 		backend.Task{UUID: uuidB, Description: "Done task", Project: "home", Status: "completed"},
 	)
@@ -1946,7 +1981,7 @@ func TestCustomViewKeepsExactStatusSemantics(t *testing.T) {
 func TestCustomViewNamesTakePrecedenceAtRoot(t *testing.T) {
 	atProject := task(uuidA, "At project", "@Due")
 
-	withView, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Due", Filter: "status:any:"}}, atProject)
+	withView, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:any:"}}, atProject)
 	child, errno := withView.resolveChild("@Due")
 	if errno != 0 {
 		t.Fatalf("lookup @Due with custom view: %v", errno)
@@ -1955,7 +1990,7 @@ func TestCustomViewNamesTakePrecedenceAtRoot(t *testing.T) {
 		t.Fatalf("lookup @Due with custom view returned %T, want *viewNode", child)
 	}
 
-	withoutView, _, _ := newSweepFSWithViews(backend.RemoveDelete, nil, atProject)
+	withoutView, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, nil, atProject)
 	child, errno = withoutView.resolveChild("@Due")
 	if errno != 0 {
 		t.Fatalf("lookup @Due without custom view: %v", errno)
@@ -1967,7 +2002,7 @@ func TestCustomViewNamesTakePrecedenceAtRoot(t *testing.T) {
 }
 
 func TestCustomViewTaskFileInodePerView(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Next", Filter: "+next"}},
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Next", Filter: "+next"}},
 		task(uuidA, "Chore", "home", "next"),
 	)
 	name := naming.FileName("Chore", uuidA)
@@ -1990,7 +2025,7 @@ func TestCustomViewTaskFileInodePerView(t *testing.T) {
 }
 
 func TestCustomViewTaskFileIdentityAndContent(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "All", Filter: "status:any:"}},
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "All", Filter: "status:any:"}},
 		task(uuidA, "Do taxes", "finances"),
 	)
 	name := naming.FileName("Do taxes", uuidA)
@@ -2017,7 +2052,7 @@ func TestCustomViewTaskFileIdentityAndContent(t *testing.T) {
 }
 
 func TestCustomViewDirectoriesRejectCreationAndMoves(t *testing.T) {
-	fs, runner, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Next", Filter: "+next"}},
+	fs, runner, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Next", Filter: "+next"}},
 		task(uuidA, "Chore", "home", "next"),
 	)
 	vn := resolveViewNode(t, fs, "@Next")
@@ -2060,7 +2095,7 @@ func TestCustomViewTaskRemovalAppliesConfiguredAction(t *testing.T) {
 		{backend.RemoveDelete, func(db *sweepDB) bool { return db.deleted[uuidA] }},
 	} {
 		t.Run(string(tt.action), func(t *testing.T) {
-			fs, _, db := newSweepFSWithViews(tt.action, []View{{Name: "Due", Filter: "status:pending"}},
+			fs, _, db := newSweepFSWithViews(t, tt.action, []testView{{Name: "Due", Filter: "status:pending"}},
 				task(uuidA, "Do taxes", "home"),
 			)
 			vn := resolveViewNode(t, fs, "@Due")
@@ -2079,7 +2114,7 @@ func TestCustomViewTaskRemovalAppliesConfiguredAction(t *testing.T) {
 }
 
 func TestCompletedCustomViewTaskRemovalIsNoopUnderComplete(t *testing.T) {
-	fs, runner, _ := newSweepFSWithViews(backend.RemoveComplete, []View{{Name: "Done", Filter: "status:completed"}},
+	fs, runner, _ := newSweepFSWithViews(t, backend.RemoveComplete, []testView{{Name: "Done", Filter: "status:completed"}},
 		backend.Task{UUID: uuidA, Description: "Finished", Project: "home", Status: "completed"},
 	)
 	vn := resolveViewNode(t, fs, "@Done")
@@ -2092,59 +2127,50 @@ func TestCompletedCustomViewTaskRemovalIsNoopUnderComplete(t *testing.T) {
 	}
 }
 
-func TestRmdirCustomViewDirectoryUsesViewEmptinessRule(t *testing.T) {
-	t.Run("complete", func(t *testing.T) {
-		fs, runner, db := newSweepFSWithViews(backend.RemoveComplete, []View{{Name: "Due", Filter: "status:pending"}},
-			task(uuidA, "Do taxes", "home"),
-		)
-		if errno := fs.Rmdir(context.Background(), "@Due"); errno != syscall.ENOTEMPTY {
-			t.Fatalf("rmdir actionable custom view: errno = %v, want ENOTEMPTY", errno)
-		}
-		if n := mutationCount(runner); n != 0 {
-			t.Errorf("guarded custom view rmdir issued %d mutations", n)
-		}
-		db.tasks[0].Status = "completed"
-		if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
-			t.Errorf("rmdir emptied custom view: %v", errno)
-		}
-		if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
-			t.Errorf("custom view directory disappeared after rmdir: %v", names)
-		}
-	})
-
-	t.Run("delete", func(t *testing.T) {
-		fs, _, db := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Due", Filter: "status:pending"}},
-			task(uuidA, "Do taxes", "home"),
-		)
-		if errno := fs.Rmdir(context.Background(), "@Due"); errno != syscall.ENOTEMPTY {
-			t.Fatalf("rmdir actionable custom view: errno = %v, want ENOTEMPTY", errno)
-		}
-		db.tasks[0].Status = "deleted"
-		if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
-			t.Errorf("rmdir emptied custom view: %v", errno)
-		}
-		if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
-			t.Errorf("custom view directory disappeared after rmdir: %v", names)
-		}
-	})
+func TestRmdirCustomViewDeletesDefinitionWithoutChangingTasks(t *testing.T) {
+	for _, action := range []backend.RemoveAction{backend.RemoveComplete, backend.RemoveDelete} {
+		t.Run(string(action), func(t *testing.T) {
+			fs, runner, _ := newSweepFSWithViews(t, action, []testView{{Name: "Due", Filter: "status:pending"}},
+				task(uuidA, "Do taxes", "home"),
+			)
+			if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
+				t.Fatalf("rmdir custom view: %v", errno)
+			}
+			if n := mutationCount(runner); n != 0 {
+				t.Errorf("custom view rmdir issued %d mutations", n)
+			}
+			if names := readdirOfRoot(t, fs); contains(names, "@Due") {
+				t.Errorf("custom view remained after rmdir: %v", names)
+			}
+			if _, ok, err := fs.viewStore.Get("Due"); err != nil || ok {
+				t.Errorf("view definition remained after rmdir: ok=%v err=%v", ok, err)
+			}
+		})
+	}
 }
 
 func TestRecursiveCustomViewRemovalConverges(t *testing.T) {
 	for _, action := range []backend.RemoveAction{backend.RemoveComplete, backend.RemoveDelete} {
 		t.Run(string(action), func(t *testing.T) {
-			fs, _, db := newSweepFSWithViews(action, []View{{Name: "Due", Filter: "status:pending"}},
+			fs, _, db := newSweepFSWithViews(t, action, []testView{{Name: "Due", Filter: "status:pending"}},
 				task(uuidA, "Do taxes", "home"),
 			)
 			vn := resolveViewNode(t, fs, "@Due")
 			name := naming.FileName("Do taxes", uuidA)
+			if names := readdirViewOf(t, vn); !contains(names, name) {
+				t.Fatalf("initial view listing missing task: %v", names)
+			}
+			if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
+				t.Fatalf("unlink _filter: %v", errno)
+			}
 			if errno := vn.Unlink(context.Background(), name); errno != 0 {
-				t.Fatalf("unlink custom view task: %v", errno)
+				t.Fatalf("unlink task after clearing _filter: %v", errno)
 			}
 			if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
-				t.Fatalf("rmdir emptied custom view: %v", errno)
+				t.Fatalf("rmdir custom view: %v", errno)
 			}
-			if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
-				t.Errorf("custom view directory disappeared after recursive removal: %v", names)
+			if names := readdirOfRoot(t, fs); contains(names, "@Due") {
+				t.Errorf("custom view remained after recursive removal: %v", names)
 			}
 			if action == backend.RemoveComplete && !db.completed[uuidA] {
 				t.Error("recursive complete did not complete the task")
@@ -2156,9 +2182,412 @@ func TestRecursiveCustomViewRemovalConverges(t *testing.T) {
 	}
 }
 
-func TestRootMkdirRejectsConfiguredViewName(t *testing.T) {
-	fs, _, _ := newSweepFSWithViews(backend.RemoveDelete, []View{{Name: "Due", Filter: "status:any:"}})
-	if _, errno := fs.Mkdir(context.Background(), "@Due", 0755, &fuse.EntryOut{}); errno != syscall.EEXIST {
-		t.Errorf("mkdir configured custom view name: errno = %v, want EEXIST", errno)
+func TestRootMkdirCreatesEmptyView(t *testing.T) {
+	fs, runner, _ := newSweepFS(t)
+	if _, errno := fs.createView("@Due"); errno != 0 {
+		t.Fatalf("create @Due: %v", errno)
 	}
+	if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
+		t.Fatalf("root listing missing @Due: %v", names)
+	}
+	vn := resolveViewNode(t, fs, "@Due")
+	if names := readdirViewOf(t, vn); len(names) != 0 {
+		t.Errorf("new view listing = %v, want no entries", names)
+	}
+	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != syscall.ENOENT {
+		t.Errorf("lookup _filter before creation: errno = %v, want ENOENT", errno)
+	}
+	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "" {
+		t.Errorf("new view definition = %q, %v, %v; want empty", query, ok, err)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("mkdir view issued %d task mutations", n)
+	}
+}
+
+func TestRootMkdirDuplicateViewFails(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:any:"}})
+	if _, errno := fs.Mkdir(context.Background(), "@Due", 0o755, &fuse.EntryOut{}); errno != syscall.EEXIST {
+		t.Errorf("mkdir duplicate view: errno = %v, want EEXIST", errno)
+	}
+}
+
+func TestRuntimeViewNameValidation(t *testing.T) {
+	fs, _, _ := newSweepFS(t)
+	for _, name := range []string{
+		"@",
+		"@.",
+		"@..",
+		"@Report.a1b2c3d4.md",
+		"@" + strings.Repeat("a", 255),
+		"@bad\tname",
+	} {
+		if _, errno := fs.Mkdir(context.Background(), name, 0o755, &fuse.EntryOut{}); errno != syscall.EINVAL {
+			t.Errorf("mkdir %q: errno = %v, want EINVAL", name, errno)
+		}
+	}
+	if names := readdirOfRoot(t, fs); len(names) != 2 {
+		t.Errorf("invalid view names created entries: %v", names)
+	}
+}
+
+func TestViewFilterFileReadWrite(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete,
+		[]testView{{Name: "Due", Filter: ""}},
+		task(uuidA, "Do taxes", "home"),
+	)
+	vn := resolveViewNode(t, fs, "@Due")
+	qn, handle := createFilterNode(t, vn, syscall.O_WRONLY|syscall.O_TRUNC)
+
+	if size := filterSize(t, qn); size != 0 {
+		t.Errorf("new filter size = %d, want 0", size)
+	}
+	if got := readFilter(t, qn); got != "" {
+		t.Errorf("new filter = %q, want empty", got)
+	}
+	if errno := qn.Release(context.Background(), handle); errno != 0 {
+		t.Fatalf("release empty filter: %v", errno)
+	}
+
+	writeFilter(t, qn, "status:pending")
+	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != 0 {
+		t.Errorf("lookup _filter after write: %v", errno)
+	}
+	if got := readFilter(t, qn); got != "status:pending" {
+		t.Errorf("read after write = %q", got)
+	}
+	if size := filterSize(t, qn); size != len("status:pending") {
+		t.Errorf("query size = %d, want %d", size, len("status:pending"))
+	}
+	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "status:pending" {
+		t.Errorf("stored query = %q, %v, %v", query, ok, err)
+	}
+	if names := readdirViewOf(t, vn); !contains(names, naming.FileName("Do taxes", uuidA)) {
+		t.Errorf("view did not use written query: %v", names)
+	}
+}
+
+func TestNodeAttributesReportMountOwner(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete,
+		[]testView{{Name: "Due", Filter: "status:pending"}},
+		task(uuidA, "Do taxes", "home"),
+	)
+	vn := resolveViewNode(t, fs, "@Due")
+	var dirOut fuse.AttrOut
+	if errno := vn.Getattr(context.Background(), nil, &dirOut); errno != 0 {
+		t.Fatalf("view Getattr: %v", errno)
+	}
+	qn := resolveFilterNode(t, vn)
+	var fileOut fuse.AttrOut
+	if errno := qn.Getattr(context.Background(), nil, &fileOut); errno != 0 {
+		t.Fatalf("filter Getattr: %v", errno)
+	}
+	for name, out := range map[string]fuse.AttrOut{"view": dirOut, "filter": fileOut} {
+		if out.Uid != uint32(os.Getuid()) || out.Gid != uint32(os.Getgid()) {
+			t.Errorf("%s owner = %d:%d, want %d:%d", name, out.Uid, out.Gid, os.Getuid(), os.Getgid())
+		}
+	}
+	if perm := fileOut.Mode & 0o777; perm&0o200 == 0 {
+		t.Errorf("filter mode = %o, want owner-writable", perm)
+	}
+}
+
+func TestViewFilterMultiChunkWrite(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
+	qn, fh := createFilterNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
+	if _, errno := qn.Write(context.Background(), fh, []byte("status:"), 0); errno != 0 {
+		t.Fatalf("Write first chunk: %v", errno)
+	}
+	if _, errno := qn.Write(context.Background(), fh, []byte("pending"), 7); errno != 0 {
+		t.Fatalf("Write second chunk: %v", errno)
+	}
+	if errno := qn.Flush(context.Background(), fh); errno != 0 {
+		t.Fatalf("Flush: %v", errno)
+	}
+	if got := readFilter(t, qn); got != "status:pending" {
+		t.Errorf("multi-chunk filter = %q", got)
+	}
+}
+
+func TestViewFilterTruncateAndTouch(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:pending"}})
+	vn := resolveViewNode(t, fs, "@Due")
+	qn := resolveFilterNode(t, vn)
+
+	writeFilter(t, qn, "")
+	if got := readFilter(t, qn); got != "" {
+		t.Errorf("truncated filter = %q, want empty", got)
+	}
+	if names := readdirViewOf(t, vn); !contains(names, filterFileName) {
+		t.Errorf("empty filter is not listed: %v", names)
+	}
+
+	if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
+		t.Fatalf("unlink _filter: %v", errno)
+	}
+	if names := readdirViewOf(t, vn); len(names) != 0 {
+		t.Errorf("view after _filter removal = %v, want no entries", names)
+	}
+
+	child, handle, _, errno := vn.createFilter(context.Background(), filterFileName, syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("create _filter: %v", errno)
+	}
+	if errno := child.(*filterFileNode).Release(context.Background(), handle); errno != 0 {
+		t.Fatalf("release recreated _filter: %v", errno)
+	}
+	if names := readdirViewOf(t, vn); !contains(names, filterFileName) {
+		t.Errorf("touched _filter is not listed: %v", names)
+	}
+}
+
+func TestViewFilterSetattrTruncatesOpenHandle(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:pending +next"}})
+	qn := resolveFilterNode(t, resolveViewNode(t, fs, "@Due"))
+	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("Open: %v", errno)
+	}
+	in := &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{Valid: fuse.FATTR_SIZE}}
+	var out fuse.AttrOut
+	if errno := qn.Setattr(context.Background(), handle, in, &out); errno != 0 {
+		t.Fatalf("Setattr truncate: %v", errno)
+	}
+	if _, errno := qn.Write(context.Background(), handle, []byte("status:pending\n"), 0); errno != 0 {
+		t.Fatalf("Write: %v", errno)
+	}
+	if errno := qn.Flush(context.Background(), handle); errno != 0 {
+		t.Fatalf("Flush: %v", errno)
+	}
+	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "status:pending\n" {
+		t.Errorf("stored query = %q, %v, %v; want truncated replacement", query, ok, err)
+	}
+}
+
+func TestViewFilterFsyncPersists(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
+	qn, handle := createFilterNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
+	if _, errno := qn.Write(context.Background(), handle, []byte("status:pending"), 0); errno != 0 {
+		t.Fatalf("Write: %v", errno)
+	}
+	if errno := qn.Fsync(context.Background(), handle, 0); errno != 0 {
+		t.Fatalf("Fsync: %v", errno)
+	}
+	if filter, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || filter != "status:pending" {
+		t.Errorf("stored filter after fsync = %q, %v, %v", filter, ok, err)
+	}
+}
+
+func TestViewFilterFlushFailureKeepsPrevious(t *testing.T) {
+	store := newViewStore(t)
+	if err := store.Put("Due", "status:pending"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	failing := failPutStore{ViewStore: store}
+	f := New(backend.NewQuery(&fakeRunner{fn: func([]string) ([]byte, error) { return []byte("[]"), nil }}),
+		Config{ViewStore: failing})
+	vn := resolveViewNode(t, f, "@Due")
+	qn := resolveFilterNode(t, vn)
+	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY|syscall.O_TRUNC)
+	if errno != 0 {
+		t.Fatalf("Open: %v", errno)
+	}
+	if _, errno := qn.Write(context.Background(), handle, []byte("status:completed"), 0); errno != 0 {
+		t.Fatalf("Write: %v", errno)
+	}
+	if errno := qn.Flush(context.Background(), handle); errno != syscall.EIO {
+		t.Fatalf("Flush = %v, want EIO", errno)
+	}
+	if query, ok, err := store.Get("Due"); err != nil || !ok || query != "status:pending" {
+		t.Errorf("stored query after failed flush = %q, %v, %v", query, ok, err)
+	}
+}
+
+func TestViewRemoveFilterClearsButKeepsView(t *testing.T) {
+	fs, runner, _ := newSweepFSWithViews(t, backend.RemoveDelete,
+		[]testView{{Name: "Due", Filter: "status:pending"}},
+		task(uuidA, "Do taxes", "home"),
+	)
+	vn := resolveViewNode(t, fs, "@Due")
+	if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
+		t.Fatalf("unlink _filter: %v", errno)
+	}
+	if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
+		t.Errorf("view disappeared after _filter removal: %v", names)
+	}
+	if names := readdirViewOf(t, vn); len(names) != 0 {
+		t.Errorf("view after _filter removal = %v, want no entries", names)
+	}
+	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != syscall.ENOENT {
+		t.Errorf("lookup _filter after removal: errno = %v, want ENOENT", errno)
+	}
+	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "" {
+		t.Errorf("stored query = %q, %v, %v; want empty definition", query, ok, err)
+	}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("_filter removal issued %d task mutations", n)
+	}
+}
+
+func TestViewInvalidFilterReturnsEIO(t *testing.T) {
+	store := newViewStore(t)
+	if err := store.Put("Broken", "("); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	runner := &fakeRunner{fn: func([]string) ([]byte, error) { return nil, errors.New("bad filter") }}
+	fs := New(backend.NewQuery(runner), Config{ViewStore: store})
+	vn := resolveViewNode(t, fs, "@Broken")
+	if _, errno := vn.Readdir(context.Background()); errno != syscall.EIO {
+		t.Errorf("Readdir: errno = %v, want EIO", errno)
+	}
+	if _, errno := vn.Lookup(context.Background(), naming.FileName("Do taxes", uuidA), &fuse.EntryOut{}); errno != syscall.EIO {
+		t.Errorf("Lookup: errno = %v, want EIO", errno)
+	}
+	if errno := vn.Unlink(context.Background(), naming.FileName("Do taxes", uuidA)); errno != syscall.EIO {
+		t.Errorf("Unlink: errno = %v, want EIO", errno)
+	}
+	if errno := fs.Rmdir(context.Background(), "@Broken"); errno != 0 {
+		t.Errorf("Rmdir should delete the definition without querying: %v", errno)
+	}
+}
+
+func TestViewAllowsOnlyFilterCreation(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
+	vn := resolveViewNode(t, fs, "@Due")
+	if _, _, _, errno := vn.createFilter(context.Background(), "New task", syscall.O_WRONLY); errno != syscall.EACCES {
+		t.Errorf("create non-query: errno = %v, want EACCES", errno)
+	}
+	if _, _, _, errno := vn.createFilter(context.Background(), filterFileName, syscall.O_WRONLY); errno != 0 {
+		t.Errorf("create _filter: errno = %v", errno)
+	}
+	if _, errno := vn.Mkdir(context.Background(), "sub", 0o755, &fuse.EntryOut{}); errno != syscall.EACCES {
+		t.Errorf("Mkdir: errno = %v, want EACCES", errno)
+	}
+}
+
+func TestRmdirAtPrefixedProjectWithoutViewRemovesTasks(t *testing.T) {
+	fs, _, db := newSweepFS(t, task(uuidA, "At project", "@Due"))
+	if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
+		t.Fatalf("rmdir @Due project: %v", errno)
+	}
+	if !db.deleted[uuidA] {
+		t.Error("removing an @-prefixed project did not apply the removal action")
+	}
+}
+
+func TestViewShadowsAndRevealsProject(t *testing.T) {
+	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete,
+		[]testView{{Name: "Due", Filter: "status:pending"}},
+		task(uuidA, "At project", "@Due"),
+	)
+	child, errno := fs.resolveChild("@Due")
+	if errno != 0 {
+		t.Fatalf("lookup @Due: %v", errno)
+	}
+	if _, ok := child.(*viewNode); !ok {
+		t.Fatalf("lookup @Due = %T, want view", child)
+	}
+	if names := readdirOfRoot(t, fs); countName(names, "@Due") != 1 {
+		t.Errorf("root listing must contain one @Due: %v", names)
+	}
+
+	if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
+		t.Fatalf("rmdir @Due: %v", errno)
+	}
+	child, errno = fs.resolveChild("@Due")
+	if errno != 0 {
+		t.Fatalf("lookup @Due after view removal: %v", errno)
+	}
+	dir, ok := child.(*dirNode)
+	if !ok || dir.filter.Project != "@Due" {
+		t.Fatalf("lookup @Due after view removal = %T / %+v, want project", child, child)
+	}
+}
+
+func resolveFilterNode(t *testing.T, vn *viewNode) *filterFileNode {
+	t.Helper()
+	child, errno := vn.resolveChild(context.Background(), filterFileName, false)
+	if errno != 0 {
+		t.Fatalf("lookup _filter: %v", errno)
+	}
+	qn, ok := child.(*filterFileNode)
+	if !ok {
+		t.Fatalf("lookup _filter returned %T", child)
+	}
+	return qn
+}
+
+func createFilterNode(t *testing.T, vn *viewNode, flags uint32) (*filterFileNode, fs.FileHandle) {
+	t.Helper()
+	child, handle, _, errno := vn.createFilter(context.Background(), filterFileName, flags)
+	if errno != 0 {
+		t.Fatalf("create _filter: %v", errno)
+	}
+	qn, ok := child.(*filterFileNode)
+	if !ok {
+		t.Fatalf("create _filter returned %T", child)
+	}
+	return qn, handle
+}
+
+func filterSize(t *testing.T, qn *filterFileNode) int {
+	t.Helper()
+	var out fuse.AttrOut
+	if errno := qn.Getattr(context.Background(), nil, &out); errno != 0 {
+		t.Fatalf("query Getattr: %v", errno)
+	}
+	return int(out.Size)
+}
+
+func readFilter(t *testing.T, qn *filterFileNode) string {
+	t.Helper()
+	handle, _, errno := qn.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("query Open: %v", errno)
+	}
+	buf := make([]byte, 256)
+	result, errno := qn.Read(context.Background(), handle, buf, 0)
+	if errno != 0 {
+		t.Fatalf("query Read: %v", errno)
+	}
+	data, status := result.Bytes(buf)
+	if status != fuse.OK {
+		t.Fatalf("query Read status: %v", status)
+	}
+	return string(data)
+}
+
+func writeFilter(t *testing.T, qn *filterFileNode, query string) {
+	t.Helper()
+	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY|syscall.O_TRUNC)
+	if errno != 0 {
+		t.Fatalf("query Open: %v", errno)
+	}
+	if _, errno := qn.Write(context.Background(), handle, []byte(query), 0); errno != 0 {
+		t.Fatalf("query Write: %v", errno)
+	}
+	if errno := qn.Flush(context.Background(), handle); errno != 0 {
+		t.Fatalf("query Flush: %v", errno)
+	}
+	if errno := qn.Release(context.Background(), handle); errno != 0 {
+		t.Fatalf("query Release: %v", errno)
+	}
+}
+
+func countName(names []string, want string) int {
+	count := 0
+	for _, name := range names {
+		if name == want {
+			count++
+		}
+	}
+	return count
+}
+
+type failPutStore struct {
+	ViewStore
+}
+
+func (s failPutStore) Put(name, query string) error {
+	return errors.New("put failed")
 }
