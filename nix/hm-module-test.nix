@@ -98,9 +98,8 @@ let
         enable = true;
         path = "~/some/path";
         mountFlags = [
-          "--virtual-tags"
-          "COMPLETED,DUE"
-          "--virtual-hidden"
+          "--rm"
+          "delete"
         ];
       };
     };
@@ -243,7 +242,7 @@ let
       msg = "An absolute mount path is not used as-is: ${absolute.config.systemd.user.services.task-fs.Service.ExecStart}";
     }
     {
-      cond = lib.hasInfix "mount --virtual-tags COMPLETED,DUE --virtual-hidden /home/testuser/some/path" flagged.config.systemd.user.services.task-fs.Service.ExecStart;
+      cond = lib.hasInfix "mount --rm delete /home/testuser/some/path" flagged.config.systemd.user.services.task-fs.Service.ExecStart;
       msg = "automount.mountFlags are not passed to the mount command: ${flagged.config.systemd.user.services.task-fs.Service.ExecStart}";
     }
     {
@@ -255,8 +254,18 @@ let
       msg = "A dynamic mountFlags view value is not quoted as one argument with braces unchanged: ${dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart}";
     }
     {
-      cond = !lib.hasInfix "--virtual" unit.Service.ExecStart;
-      msg = "Unset automount.mountFlags leak flags into the mount command: ${unit.Service.ExecStart}";
+      cond = lib.all (
+        start:
+        !lib.hasInfix "--virtual-tags" start
+        && !lib.hasInfix "--virtual-hidden" start
+        && !lib.hasInfix "-H " start
+      ) [
+        unit.Service.ExecStart
+        flagged.config.systemd.user.services.task-fs.Service.ExecStart
+        viewFlagged.config.systemd.user.services.task-fs.Service.ExecStart
+        dynamicViewFlagged.config.systemd.user.services.task-fs.Service.ExecStart
+      ];
+      msg = "A mount command advertises the removed virtual-tag flags";
     }
     {
       cond = disabled.config.home.packages == [ ] && !(disabled.config.systemd.user.services ? task-fs);

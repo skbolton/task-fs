@@ -97,15 +97,6 @@ func (q *Query) UniqueTags(f Filter) ([]string, error) {
 	return splitLines(out), nil
 }
 
-// AllTags returns every tag and virtual tag the CLI knows about.
-func (q *Query) AllTags() ([]string, error) {
-	out, err := q.run([]string{"_tags"})
-	if err != nil {
-		return nil, err
-	}
-	return splitLines(out), nil
-}
-
 func splitLines(out []byte) []string {
 	var lines []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -161,73 +152,6 @@ func ChildTags(combos []string) []string {
 		}
 	}
 	return tags
-}
-
-// VirtualTagsFromDiscovery keeps the fully-uppercase entries of a _tags
-// listing as the virtual-tag universe.
-func VirtualTagsFromDiscovery(entries []string) []string {
-	seen := map[string]bool{}
-	var vts []string
-	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		if e == "" || !isUppercase(e) || seen[e] {
-			continue
-		}
-		seen[e] = true
-		vts = append(vts, e)
-	}
-	return vts
-}
-
-// DefaultVirtualTagSelection is the virtual-tag set exposed when the
-// user does not narrow it.
-const DefaultVirtualTagSelection = "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"
-
-// DefaultVirtualTags intersects the default selection with the
-// discovered set: a minimal backend that does not discover every
-// default entry must not make the flagless mount fail.
-func DefaultVirtualTags(discovered []string) []string {
-	known := map[string]bool{}
-	for _, d := range discovered {
-		known[d] = true
-	}
-	var selected []string
-	for _, e := range strings.Split(DefaultVirtualTagSelection, ",") {
-		e = strings.TrimSpace(e)
-		if known[e] {
-			selected = append(selected, e)
-		}
-	}
-	return selected
-}
-
-// ResolveVirtualTags validates a --virtual-tags selection against the
-// discovered set: ALL expands to the full discovered set and must be
-// the only entry; every other entry must be discovered.
-func ResolveVirtualTags(selection string, discovered []string) ([]string, error) {
-	entries := strings.Split(selection, ",")
-	known := map[string]bool{}
-	for _, d := range discovered {
-		known[d] = true
-	}
-	var selected []string
-	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			return nil, fmt.Errorf("empty entry in virtual tags %q", selection)
-		}
-		if e == "ALL" {
-			if len(entries) > 1 {
-				return nil, fmt.Errorf("ALL must be the only virtual-tag entry")
-			}
-			return append([]string(nil), discovered...), nil
-		}
-		if !known[e] {
-			return nil, fmt.Errorf("unknown virtual tag %q", e)
-		}
-		selected = append(selected, e)
-	}
-	return selected, nil
 }
 
 // Mutations run non-interactive: rc.confirmation=off suppresses the

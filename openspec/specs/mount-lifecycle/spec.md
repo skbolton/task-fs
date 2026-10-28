@@ -43,48 +43,43 @@ The system SHALL re-query the backend for each directory listing and file lookup
 - **WHEN** a task is added or modified with the `task` CLI in another terminal while the filesystem is mounted
 - **THEN** the next directory listing or file read at the mountpoint reflects that change without remounting
 
-### Requirement: Mount options select the exposed virtual tags
+### Requirement: The mount exposes the status virtual-tag views
 
-The mount command SHALL accept `--virtual-tags`/`-t` with a comma-separated list of virtual-tag names written without the `+` sign, or the single special value `ALL`. When the flag is absent the selection SHALL default to `COMPLETED,OVERDUE,DUE,ACTIVE,WAITING`. Every entry SHALL either be `ALL` or the fully-uppercase name of a virtual tag the backend discovers; a mount with any other entry SHALL fail with an error naming the invalid entry, and nothing SHALL be mounted.
+The mount command SHALL expose exactly the `+COMPLETED` and `+DELETED` virtual-tag views. Both SHALL be listed and resolvable in every filter directory that does not already carry a virtual-tag segment, whether or not any task currently matches, and SHALL remain available when their views are empty. The mount SHALL NOT discover or validate virtual-tag names against the backend.
 
-#### Scenario: Default selection
+#### Scenario: Empty database still exposes both views
 
-- **WHEN** the user mounts without `--virtual-tags`
-- **THEN** the views for `COMPLETED`, `OVERDUE`, `DUE`, `ACTIVE`, and `WAITING` are available and views for other discovered virtual tags are not
+- **WHEN** the database has no completed or deleted tasks and the user lists the root
+- **THEN** the listing contains the directories `+COMPLETED` and `+DELETED`
 
-#### Scenario: Explicit list narrows the views
+#### Scenario: Status destinations are always available
+
+- **WHEN** the database has no completed or deleted tasks and the user moves a task file into `/+COMPLETED/` or `/+DELETED/`
+- **THEN** the move resolves the status view instead of failing with ENOENT and applies the corresponding complete or delete action
+
+#### Scenario: Other derived filters are custom views
+
+- **WHEN** the user runs `task-fs mount ~/m --view 'Due=+DUE'`
+- **THEN** the root exposes the custom view directory `@Due` and does not expose a `+DUE` virtual-tag directory
+
+### Requirement: Removed virtual-tag mount flags fail the mount
+
+The mount command SHALL reject `--virtual-tags`, `-t`, `--virtual-hidden`, and `-H` as unknown options, exit non-zero with a usage message, and mount nothing.
+
+#### Scenario: Removed selection flag fails the mount
 
 - **WHEN** the user runs `task-fs mount ~/m --virtual-tags "COMPLETED,DUE"`
-- **THEN** only the `COMPLETED` and `DUE` virtual-tag views are available
+- **THEN** the command exits non-zero with a usage message and mounts nothing
 
-#### Scenario: ALL restores the full discovered set
+#### Scenario: Removed presentation flag fails the mount
 
-- **WHEN** the user runs `task-fs mount ~/m --virtual-tags ALL`
-- **THEN** every fully-uppercase virtual tag the backend discovers is available as a view
+- **WHEN** the user runs `task-fs mount ~/m --virtual-hidden`
+- **THEN** the command exits non-zero with a usage message and mounts nothing
 
-#### Scenario: Invalid entry fails the mount
+#### Scenario: Removed short flags fail the mount
 
-- **WHEN** the user runs `task-fs mount ~/m --virtual-tags "COMPLETED,bogus"`
-- **THEN** the command exits non-zero with an error naming `bogus` and mounts nothing
-
-### Requirement: Presentation of virtual-tag directories is selectable
-
-The mount command SHALL accept `--virtual-hidden`/`-H` to present virtual-tag directories as hidden, dot-prefixed entries named `.+NAME`. Without the flag they SHALL be presented as regular, `+`-prefixed entries named `+NAME`. Presentation SHALL affect only entry names and listing visibility, not the filter a virtual-tag view resolves to.
-
-#### Scenario: Hidden presentation
-
-- **WHEN** the user mounts with `--virtual-hidden` and lists the root with a plain `ls`
-- **THEN** the virtual-tag entries `.+COMPLETED`, `.+DUE`, ... are absent from the output and present with `ls -a`
-
-#### Scenario: Regular presentation
-
-- **WHEN** the user mounts without `--virtual-hidden` and lists the root with a plain `ls`
-- **THEN** the virtual-tag entries `+COMPLETED`, `+DUE`, ... appear among the directories
-
-#### Scenario: Presentation does not change the filter
-
-- **WHEN** the user lists `/+COMPLETED` on a mount without `--virtual-hidden` and `/.+COMPLETED` on a mount with `--virtual-hidden` over the same database
-- **THEN** both listings show the same completed task files
+- **WHEN** the user runs `task-fs mount ~/m -t COMPLETED` or `task-fs mount ~/m -H`
+- **THEN** each command exits non-zero with a usage message and mounts nothing
 
 ### Requirement: Mount option selects the removal action
 

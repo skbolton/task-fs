@@ -45,19 +45,18 @@ in
         type = lib.types.listOf lib.types.str;
         default = [ ];
         example = [
-          "--virtual-tags"
-          "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"
-          "--virtual-hidden"
+          "--rm"
+          "delete"
           "--view"
           "Next Week=status:pending due.before:{{ date -d \"+7 days\" +%F }}"
         ];
         description = ''
           Flags passed to `task-fs mount` by the automount service. Each
-          item is one command-line token. For example, the first two flags
-          narrow the virtual-tag views to the listed set and present them
-          as hidden `.+NAME` directories, while the `--view` item defines a
+          item is one command-line token. For example, `--rm delete` makes
+          removal gestures destructive, while the `--view` item defines a
           custom view whose `{{ ... }}` block re-runs a shell command when
-          the view is browsed.
+          the view is browsed. Every mount already exposes the
+          `+COMPLETED` and `+DELETED` status views.
 
           Dynamic view commands run in the automount service environment,
           which provides a POSIX shell and coreutils. Commands outside that

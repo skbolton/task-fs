@@ -54,14 +54,8 @@ func hasArg(args []string, want string) bool {
 
 // newTestFS wires a filesystem against a stubbed command runner that
 // serves canned results depending on the rendered filter arguments.
-// Without a Config it exposes every discovered virtual tag in hidden
-// presentation, mirroring the legacy --virtual-hidden --virtual-tags
-// ALL behavior that most existing tests assert.
-func newTestFS(pending, completed []backend.Task, projects, tags, allTags []string, cfgs ...Config) (*FS, *fakeRunner) {
+func newTestFS(pending, completed []backend.Task, projects, tags []string, cfgs ...Config) (*FS, *fakeRunner) {
 	runner := &fakeRunner{fn: func(args []string) ([]byte, error) {
-		if hasArg(args, "_tags") {
-			return []byte(strings.Join(allTags, "\n")), nil
-		}
 		if hasArg(args, "_unique") {
 			if hasArg(args, "project") {
 				return []byte(strings.Join(projects, "\n")), nil
@@ -76,7 +70,7 @@ func newTestFS(pending, completed []backend.Task, projects, tags, allTags []stri
 		}
 		return nil, nil
 	}}
-	cfg := Config{RemoveAction: backend.RemoveDelete, VirtualTags: backend.VirtualTagsFromDiscovery(allTags), Hidden: true}
+	cfg := Config{RemoveAction: backend.RemoveDelete}
 	if len(cfgs) > 0 {
 		cfg = cfgs[0]
 	}
@@ -108,20 +102,20 @@ func TestRootReaddirListsVocabulary(t *testing.T) {
 		[]backend.Task{
 			task(uuidA, "Clean the garage", "home.clean-garage", "next"),
 			task(uuidB, "File taxes", "finances.2026-taxes"),
-		},
-		nil,
-		[]string{"home.clean-garage", "finances.2026-taxes"},
-		[]string{"next"},
-		[]string{"ACTIVE", "COMPLETED", "DUE"},
-	)
+		}, nil, []string{"home.clean-garage", "finances.2026-taxes"}, []string{"next"})
 	stream, errno := fs.Readdir(context.Background())
 	if errno != 0 {
 		t.Fatalf("Readdir: %v", errno)
 	}
 	names := readdirNames(t, stream)
-	for _, want := range []string{"home", "finances", "+next", ".+COMPLETED", ".+DUE"} {
+	for _, want := range []string{"home", "finances", "+next", "+COMPLETED", "+DELETED"} {
 		if !contains(names, want) {
 			t.Errorf("root listing missing %q; got %v", want, names)
+		}
+	}
+	for _, absent := range []string{".+COMPLETED", ".+DELETED", "+DUE"} {
+		if contains(names, absent) {
+			t.Errorf("root listing must not contain %q; got %v", absent, names)
 		}
 	}
 	homeNode, errno := fs.resolveChild("home")
@@ -150,83 +144,72 @@ func readdirOf(t *testing.T, n *dirNode) ([]string, syscall.Errno) {
 	return readdirNames(t, stream), 0
 }
 
-func TestVirtualTagSpellingsResolveInBothModes(t *testing.T) {
-	tags := []string{"COMPLETED", "DUE"}
-	tests := []struct {
-		name   string
-		config Config
-	}{
-		{"regular presentation", Config{RemoveAction: backend.RemoveDelete, VirtualTags: tags, Hidden: false}},
-		{"hidden presentation", Config{RemoveAction: backend.RemoveDelete, VirtualTags: tags, Hidden: true}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fs, _ := newTestFS(
-				[]backend.Task{task(uuidA, "Chore", "home")},
-				[]backend.Task{task(uuidA, "Old chore", "home")},
-				[]string{"home"},
-				[]string{},
-				tags,
-				tt.config,
-			)
-			plus, errno := fs.resolveChild("+COMPLETED")
-			if errno != 0 {
-				t.Fatalf("lookup +COMPLETED: %v", errno)
-			}
-			dot, errno := fs.resolveChild(".+COMPLETED")
-			if errno != 0 {
-				t.Fatalf("lookup .+COMPLETED: %v", errno)
-			}
-			if canonicalKey(plus.(*dirNode).filter) != canonicalKey(dot.(*dirNode).filter) {
-				t.Error("both spellings must resolve to the same filter")
-			}
-		})
-	}
-}
-
-func TestUnselectedVirtualTagSpellingIsENOENT(t *testing.T) {
+func TestStatusVirtualTagsResolveAndList(t *testing.T) {
 	fs, _ := newTestFS(
 		[]backend.Task{task(uuidA, "Chore", "home")},
-		nil,
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED"},
-		Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED"}, Hidden: true},
-	)
-	for _, spelling := range []string{"+DUE", ".+DUE"} {
-		if _, errno := fs.resolveChild(spelling); errno != syscall.ENOENT {
-			t.Errorf("lookup %s on a mount without DUE: errno = %v, want ENOENT", spelling, errno)
+		[]backend.Task{task(uuidA, "Old chore", "home")},
+		[]string{"home"}, []string{})
+	for _, name := range []string{"+COMPLETED", "+DELETED"} {
+		if _, errno := fs.resolveChild(name); errno != 0 {
+			t.Errorf("lookup %s: %v", name, errno)
+		}
+		if _, errno := fs.resolveChild("." + name); errno != syscall.ENOENT {
+			t.Errorf("lookup .%s: errno = %v, want ENOENT", name, errno)
+		}
+	}
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
+	}
+	for _, want := range []string{"+COMPLETED", "+DELETED"} {
+		if !contains(names, want) {
+			t.Errorf("root listing missing %q: %v", want, names)
+		}
+	}
+	for _, absent := range []string{".+COMPLETED", ".+DELETED"} {
+		if contains(names, absent) {
+			t.Errorf("root listing must not contain %q: %v", absent, names)
 		}
 	}
 }
 
-func TestSelectedVirtualTagShadowsUppercaseTag(t *testing.T) {
+func TestNonStatusVirtualSegmentsAreNotVirtual(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home", "DUE")},
-		nil,
-		[]string{"home"},
-		[]string{"DUE"},
-		[]string{"COMPLETED", "DUE"},
-		Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED", "DUE"}, Hidden: true},
-	)
+		[]backend.Task{task(uuidA, "Chore", "home")}, nil, []string{"home"}, []string{})
+	for _, name := range []string{"+DUE", ".+DUE", ".+COMPLETED"} {
+		if _, errno := fs.resolveChild(name); errno != syscall.ENOENT {
+			t.Errorf("lookup %s: errno = %v, want ENOENT", name, errno)
+		}
+	}
+
+	fs, _ = newTestFS(
+		[]backend.Task{task(uuidA, "Chore", "home", "DUE")}, nil, []string{"home"}, []string{"DUE"})
 	child, errno := fs.resolveChild("+DUE")
 	if errno != 0 {
-		t.Fatalf("lookup +DUE: %v", errno)
+		t.Fatalf("lookup tag +DUE: %v", errno)
 	}
 	f := child.(*dirNode).filter
-	if !contains(f.VirtualTags, "DUE") || contains(f.Tags, "DUE") {
-		t.Errorf("selected virtual tag must win over a same-named tag: %+v", f)
+	if !contains(f.Tags, "DUE") || len(f.VirtualTags) != 0 {
+		t.Errorf("+DUE must resolve as a tag filter: %+v", f)
+	}
+}
+
+func TestStatusVirtualTagShadowsUppercaseTag(t *testing.T) {
+	fs, _ := newTestFS(
+		[]backend.Task{task(uuidA, "Chore", "home", "COMPLETED")}, nil, []string{"home"}, []string{"COMPLETED"})
+	child, errno := fs.resolveChild("+COMPLETED")
+	if errno != 0 {
+		t.Fatalf("lookup +COMPLETED: %v", errno)
+	}
+	f := child.(*dirNode).filter
+	if !contains(f.VirtualTags, "COMPLETED") || contains(f.Tags, "COMPLETED") {
+		t.Errorf("status virtual tag must win over a same-named tag: %+v", f)
 	}
 }
 
 func TestLookupStrictENOENT(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Clean the garage", "home.clean-garage", "next")},
-		nil,
-		[]string{"home.clean-garage"},
-		[]string{"next"},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Clean the garage", "home.clean-garage", "next")}, nil, []string{"home.clean-garage"}, []string{"next"})
 	if _, errno := fs.resolveChild("homi"); errno != syscall.ENOENT {
 		t.Errorf("lookup typo'd segment: errno = %v, want ENOENT", errno)
 	}
@@ -261,13 +244,8 @@ func TestCompletedOnlyUnderCompletedSubtree(t *testing.T) {
 		Status:      "completed",
 	}
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidB, "Chore", "home")},
-		[]backend.Task{completed},
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
-	completedDir, errno := fs.resolveChild(".+COMPLETED")
+		[]backend.Task{task(uuidB, "Chore", "home")}, []backend.Task{completed}, []string{"home"}, []string{})
+	completedDir, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
 		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
@@ -292,12 +270,7 @@ func TestCompletedOnlyUnderCompletedSubtree(t *testing.T) {
 
 func TestLookupResolvesTaskFileAndXattr(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Do taxes", "finances")},
-		nil,
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Do taxes", "finances")}, nil, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
 	finances, errno := fs.resolveChild("finances")
 	if errno != 0 {
@@ -334,12 +307,7 @@ func TestLookupResolvesTaskFileAndXattr(t *testing.T) {
 
 func TestCreateGestures(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidB, "Old", "home")},
-		nil,
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidB, "Old", "home")}, nil, []string{"home"}, []string{})
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
@@ -375,16 +343,16 @@ func TestCreateGestures(t *testing.T) {
 }
 
 func TestCreateDropsVirtualTags(t *testing.T) {
-	fs, runner := newTestFS(nil, nil, []string{"home"}, []string{}, []string{"COMPLETED", "DUE"})
-	due, errno := fs.resolveChild("home")
+	fs, runner := newTestFS(nil, nil, []string{"home"}, []string{})
+	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
 	}
-	dueNode, errno := due.(*dirNode).resolveChild(".+DUE")
+	completedNode, errno := home.(*dirNode).resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup +DUE: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
-	dueNode.(*dirNode).createChild("Pick up Milk")
+	completedNode.(*dirNode).createChild("Pick up Milk")
 	var addCmd []string
 	for _, cmd := range runner.log {
 		if hasArg(cmd, "add") {
@@ -394,7 +362,7 @@ func TestCreateDropsVirtualTags(t *testing.T) {
 	if addCmd == nil {
 		t.Fatal("no add command issued")
 	}
-	if hasArg(addCmd, ".+DUE") {
+	if hasArg(addCmd, "+COMPLETED") || hasArg(addCmd, "status:completed") {
 		t.Errorf("add command carries a virtual tag: %v", addCmd)
 	}
 	if !hasArg(addCmd, "project:home") {
@@ -404,12 +372,7 @@ func TestCreateDropsVirtualTags(t *testing.T) {
 
 func TestWriteRejection(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Do taxes", "finances")},
-		nil,
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Do taxes", "finances")}, nil, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
 	finances, errno := fs.resolveChild("finances")
 	if errno != 0 {
@@ -430,12 +393,7 @@ func TestWriteRejection(t *testing.T) {
 
 func TestUnlinkDeletesByFullUUID(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Do taxes", "")},
-		nil,
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Do taxes", "")}, nil, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
 	if errno := fs.Unlink(context.Background(), name); errno != 0 {
 		t.Fatalf("unlink: %v", errno)
@@ -470,9 +428,9 @@ func TestUnlinkCompletedTaskIsNoopUnderComplete(t *testing.T) {
 	fs, runner, _ := newSweepFSWithAction(backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Finished", Project: "home", Status: "completed"},
 	)
-	completed, errno := fs.resolveChild(".+COMPLETED")
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
 	name := naming.FileName("Finished", uuidA)
 	if errno := completed.(*dirNode).Unlink(context.Background(), name); errno != 0 {
@@ -485,14 +443,9 @@ func TestUnlinkCompletedTaskIsNoopUnderComplete(t *testing.T) {
 
 func TestRenameIntoCompleted(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Do taxes", "")},
-		nil,
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED", "DUE"},
-	)
+		[]backend.Task{task(uuidA, "Do taxes", "")}, nil, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
-	completed, errno := fs.resolveChild(".+COMPLETED")
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
 		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
@@ -507,51 +460,37 @@ func TestRenameIntoCompleted(t *testing.T) {
 }
 
 func TestRenameIntoDeletedDeletes(t *testing.T) {
-	for _, spelling := range []string{"+DELETED", ".+DELETED"} {
-		t.Run(spelling, func(t *testing.T) {
-			fs, runner := newTestFS(
-				[]backend.Task{task(uuidA, "Do taxes", "")},
-				nil,
-				nil,
-				nil,
-				[]string{"COMPLETED", "DELETED"},
-			)
-			name := naming.FileName("Do taxes", uuidA)
-			deleted, errno := fs.resolveChild(spelling)
-			if errno != 0 {
-				t.Fatalf("lookup %s: %v", spelling, errno)
-			}
-			if errno := fs.Rename(context.Background(), name, deleted.(*dirNode), name, 0); errno != 0 {
-				t.Fatalf("rename into %s: %v", spelling, errno)
-			}
-			delCmd := runner.log[len(runner.log)-1]
-			if len(delCmd) != 3 || !hasArg(delCmd, uuidA) || !hasArg(delCmd, "delete") || hasArg(delCmd, "done") {
-				t.Errorf("delete command = %v", delCmd)
-			}
-		})
+	fs, runner := newTestFS(
+		[]backend.Task{task(uuidA, "Do taxes", "")}, nil, nil, nil)
+	name := naming.FileName("Do taxes", uuidA)
+	deleted, errno := fs.resolveChild("+DELETED")
+	if errno != 0 {
+		t.Fatalf("lookup +DELETED: %v", errno)
+	}
+	if errno := fs.Rename(context.Background(), name, deleted.(*dirNode), name, 0); errno != 0 {
+		t.Fatalf("rename into +DELETED: %v", errno)
+	}
+	delCmd := runner.log[len(runner.log)-1]
+	if len(delCmd) != 3 || !hasArg(delCmd, uuidA) || !hasArg(delCmd, "delete") || hasArg(delCmd, "done") {
+		t.Errorf("delete command = %v", delCmd)
 	}
 }
 
 func TestRenameOutOfDeletedReopens(t *testing.T) {
 	deletedTask := backend.Task{UUID: uuidA, Description: "Do taxes", Project: "finances", Status: "deleted"}
 	fs, runner := newTestFS(
-		[]backend.Task{deletedTask},
-		nil,
-		[]string{"finances"},
-		nil,
-		[]string{"COMPLETED", "DELETED"},
-	)
+		[]backend.Task{deletedTask}, nil, []string{"finances"}, nil)
 	name := naming.FileName("Do taxes", uuidA)
-	deleted, errno := fs.resolveChild(".+DELETED")
+	deleted, errno := fs.resolveChild("+DELETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+DELETED: %v", errno)
+		t.Fatalf("lookup +DELETED: %v", errno)
 	}
 	finances, errno := fs.resolveChild("finances")
 	if errno != 0 {
 		t.Fatalf("lookup finances: %v", errno)
 	}
 	if errno := deleted.(*dirNode).Rename(context.Background(), name, finances.(*dirNode), name, 0); errno != 0 {
-		t.Fatalf("rename out of .+DELETED: %v", errno)
+		t.Fatalf("rename out of +DELETED: %v", errno)
 	}
 	var foundStatus, foundProject bool
 	for _, cmd := range runner.log {
@@ -571,23 +510,18 @@ func TestRenameOutOfDeletedReopens(t *testing.T) {
 
 func TestRenameContradictoryStatusDestinationRejected(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home")},
-		nil,
-		[]string{"home"},
-		nil,
-		[]string{"COMPLETED", "DELETED"},
-	)
+		[]backend.Task{task(uuidA, "Chore", "home")}, nil, []string{"home"}, nil)
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
 	}
-	completed, errno := fs.resolveChild(".+COMPLETED")
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
-	both, errno := completed.(*dirNode).resolveChild(".+DELETED")
+	both, errno := completed.(*dirNode).resolveChild("+DELETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED/.+DELETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED/+DELETED: %v", errno)
 	}
 	name := naming.FileName("Chore", uuidA)
 	if errno := home.(*dirNode).Rename(context.Background(), name, both, name, 0); errno != syscall.ENOTSUP {
@@ -601,14 +535,9 @@ func TestRenameContradictoryStatusDestinationRejected(t *testing.T) {
 func TestRenameOutOfCompletedReopens(t *testing.T) {
 	completedTask := backend.Task{UUID: uuidA, Description: "Do taxes", Project: "finances", Status: "completed"}
 	fs, runner := newTestFS(
-		nil,
-		[]backend.Task{completedTask},
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED", "DUE"},
-	)
+		nil, []backend.Task{completedTask}, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
-	completed, errno := fs.resolveChild(".+COMPLETED")
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
 		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
@@ -635,41 +564,25 @@ func TestRenameOutOfCompletedReopens(t *testing.T) {
 	}
 }
 
-func TestRenameVirtualOnlyDestinationRejected(t *testing.T) {
+func TestRenameDotStatusDestinationRejected(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home")},
-		nil,
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED", "DUE", "OVERDUE"},
-	)
-	overdue, errno := fs.resolveChild(".+OVERDUE")
-	if errno != 0 {
-		t.Fatalf("lookup .+OVERDUE: %v", errno)
-	}
+		[]backend.Task{task(uuidA, "Chore", "home")}, nil, []string{"home"}, []string{})
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
 	}
 	name := naming.FileName("Chore", uuidA)
-	if errno := home.(*dirNode).Rename(context.Background(), name, overdue.(*dirNode), name, 0); errno != syscall.ENOTSUP {
-		t.Errorf("rename between virtual views: errno = %v, want ENOTSUP", errno)
+	if errno := home.(*dirNode).Rename(context.Background(), name, home.(*dirNode), ".+COMPLETED", 0); errno != syscall.EINVAL {
+		t.Errorf("rename to dot status destination: errno = %v, want EINVAL", errno)
 	}
-	for _, cmd := range runner.log {
-		if hasArg(cmd, "modify") || hasArg(cmd, "done") {
-			t.Errorf("rejected rename issued commands: %v", cmd)
-		}
+	if n := mutationCount(runner); n != 0 {
+		t.Errorf("rejected rename issued %d mutations", n)
 	}
 }
 
 func TestRenameDescriptionRejected(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Old", "home")},
-		nil,
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Old", "home")}, nil, []string{"home"}, []string{})
 	if errno := fs.Rename(context.Background(),
 		naming.FileName("Old", uuidA), fs, naming.FileName("New", uuidA), 0); errno != syscall.EOPNOTSUPP {
 		t.Errorf("rename: errno = %v, want EOPNOTSUPP", errno)
@@ -729,12 +642,7 @@ func TestRenameDeltaMoves(t *testing.T) {
 				dst, _ = dst.WithSegment(seg)
 			}
 			fs, runner := newTestFS(
-				[]backend.Task{task(uuidA, "Fix leak", tt.taskProject)},
-				nil,
-				[]string{"inbox", "finances", "finances.2026-taxes"},
-				[]string{"next", "urgent"},
-				[]string{"COMPLETED"},
-			)
+				[]backend.Task{task(uuidA, "Fix leak", tt.taskProject)}, nil, []string{"inbox", "finances", "finances.2026-taxes"}, []string{"next", "urgent"})
 			newName := naming.FileName("Fix leak", uuidA)
 			if tt.dstName != "" {
 				newName = tt.dstName
@@ -768,12 +676,7 @@ func TestRenameDeltaMoves(t *testing.T) {
 
 func TestRenameUnresolvableParentChain(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Fix leak", "inbox")},
-		nil,
-		[]string{"inbox"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Fix leak", "inbox")}, nil, []string{"inbox"}, []string{})
 	if _, errno := fs.resolveChild("brandnew"); errno != syscall.ENOENT {
 		t.Errorf("lookup of undeclared project: errno = %v, want ENOENT", errno)
 	}
@@ -781,12 +684,7 @@ func TestRenameUnresolvableParentChain(t *testing.T) {
 
 func TestMkdirDeclarations(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home", "next")},
-		nil,
-		[]string{"home"},
-		[]string{"next"},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Chore", "home", "next")}, nil, []string{"home"}, []string{"next"})
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
@@ -806,8 +704,11 @@ func TestMkdirDeclarations(t *testing.T) {
 	if _, errno := homeNode.declareChild("+DUE"); errno != syscall.EACCES {
 		t.Errorf("mkdir +DUE: errno = %v, want EACCES", errno)
 	}
-	if _, errno := homeNode.declareChild(".+DUE"); errno != syscall.EACCES {
-		t.Errorf("mkdir .+DUE: errno = %v, want EACCES", errno)
+	if _, errno := homeNode.declareChild("+COMPLETED"); errno != syscall.EACCES {
+		t.Errorf("mkdir +COMPLETED: errno = %v, want EACCES", errno)
+	}
+	if _, errno := homeNode.declareChild(".+COMPLETED"); errno != syscall.EACCES {
+		t.Errorf("mkdir .+COMPLETED: errno = %v, want EACCES", errno)
 	}
 	if _, errno := homeNode.declareChild(".hidden"); errno != syscall.EACCES {
 		t.Errorf("mkdir .hidden: errno = %v, want EACCES", errno)
@@ -873,7 +774,7 @@ func TestRmdirUnusedDeclaration(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	fs := New(backend.NewQuery(runner), Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED"}, Hidden: true})
+	fs := New(backend.NewQuery(runner), Config{RemoveAction: backend.RemoveDelete})
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
 		t.Fatalf("lookup home: %v", errno)
@@ -896,12 +797,7 @@ func TestRmdirUnusedDeclaration(t *testing.T) {
 
 func TestMutationArgumentsUseFullUUID(t *testing.T) {
 	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Do taxes", "")},
-		nil,
-		[]string{"finances"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Do taxes", "")}, nil, []string{"finances"}, []string{})
 	name := naming.FileName("Do taxes", uuidA)
 	if errno := fs.Unlink(context.Background(), name); errno != 0 {
 		t.Fatalf("unlink: %v", errno)
@@ -935,24 +831,19 @@ func TestMutationArgumentsUseFullUUID(t *testing.T) {
 }
 
 func TestRenameWithVirtualTagsInSourceIgnoredInDelta(t *testing.T) {
-	fs, runner := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home")},
-		nil,
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED", "DUE"},
-	)
-	due, errno := fs.resolveChild(".+DUE")
+	completedTask := backend.Task{UUID: uuidA, Description: "Chore", Project: "home", Status: "completed"}
+	fs, runner := newTestFS(nil, []backend.Task{completedTask}, []string{"home"}, []string{})
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup +DUE: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
 	name := naming.FileName("Chore", uuidA)
-	if errno := due.(*dirNode).Rename(context.Background(), name, fs, name, 0); errno != 0 {
-		t.Fatalf("rename out of +DUE: %v", errno)
+	if errno := completed.(*dirNode).Rename(context.Background(), name, fs, name, 0); errno != 0 {
+		t.Fatalf("rename out of +COMPLETED: %v", errno)
 	}
 	for _, cmd := range runner.log {
-		if hasArg(cmd, "modify") && hasArg(cmd, "+DUE") {
-			t.Errorf("modify command carries a virtual tag: %v", cmd)
+		if hasArg(cmd, "modify") && (hasArg(cmd, "+COMPLETED") || hasArg(cmd, "status:completed")) {
+			t.Errorf("modify command carries a status virtual tag: %v", cmd)
 		}
 	}
 }
@@ -962,12 +853,7 @@ func TestExactProjectPlacement(t *testing.T) {
 		[]backend.Task{
 			task(uuidA, "Less nested project", "this.is"),
 			task(uuidB, "Test out deep projects", "this.is.a.test"),
-		},
-		nil,
-		[]string{"this.is", "this.is.a.test"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		}, nil, []string{"this.is", "this.is.a.test"}, []string{})
 	fileA := naming.FileName("Less nested project", uuidA)
 	fileB := naming.FileName("Test out deep projects", uuidB)
 
@@ -1018,12 +904,7 @@ func TestSelfTagNotListed(t *testing.T) {
 		[]backend.Task{
 			task(uuidA, "Deep task", "home", "next"),
 			task(uuidB, "Other task", "work", "next"),
-		},
-		nil,
-		[]string{"home", "work"},
-		[]string{"next"},
-		[]string{"COMPLETED"},
-	)
+		}, nil, []string{"home", "work"}, []string{"next"})
 	nextNode, errno := fs.resolveChild("+next")
 	if errno != 0 {
 		t.Fatalf("lookup +next: %v", errno)
@@ -1045,12 +926,7 @@ func TestSelfTagNotListed(t *testing.T) {
 
 func TestTaskFileInodePerView(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Chore", "home", "next")},
-		nil,
-		[]string{"home"},
-		[]string{"next"},
-		[]string{"COMPLETED"},
-	)
+		[]backend.Task{task(uuidA, "Chore", "home", "next")}, nil, []string{"home"}, []string{"next"})
 	name := naming.FileName("Chore", uuidA)
 	home, errno := fs.resolveChild("home")
 	if errno != 0 {
@@ -1082,101 +958,74 @@ func TestTaskFileInodePerView(t *testing.T) {
 	}
 }
 
-func TestVirtualTagPresentationListing(t *testing.T) {
-	allTags := []string{"ACTIVE", "COMPLETED", "DUE", "OVERDUE", "WAITING"}
-	tests := []struct {
-		name        string
-		config      Config
-		want        []string
-		mustNotHave []string
-	}{
-		{
-			name:        "regular presentation lists plus entries",
-			config:      Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED", "DUE"}, Hidden: false},
-			want:        []string{"+COMPLETED", "+DUE"},
-			mustNotHave: []string{".+COMPLETED", ".+DUE", "+ACTIVE", "+WAITING"},
-		},
-		{
-			name:        "hidden presentation lists dot entries",
-			config:      Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED", "DUE"}, Hidden: true},
-			want:        []string{".+COMPLETED", ".+DUE"},
-			mustNotHave: []string{"+COMPLETED", "+DUE"},
-		},
+func TestStatusVirtualTagsAlwaysListed(t *testing.T) {
+	fs, _ := newTestFS(
+		[]backend.Task{task(uuidA, "Chore", "home")}, nil, []string{"home"}, []string{})
+	names, errno := readdirOf(t, &fs.dirNode)
+	if errno != 0 {
+		t.Fatalf("Readdir root: %v", errno)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fs, _ := newTestFS(
-				[]backend.Task{task(uuidA, "Chore", "home")},
-				nil,
-				[]string{"home"},
-				[]string{},
-				allTags,
-				tt.config,
-			)
-			names, errno := readdirOf(t, &fs.dirNode)
-			if errno != 0 {
-				t.Fatalf("Readdir root: %v", errno)
-			}
-			for _, want := range tt.want {
-				if !contains(names, want) {
-					t.Errorf("root listing missing %q: %v", want, names)
-				}
-			}
-			for _, absent := range tt.mustNotHave {
-				if contains(names, absent) {
-					t.Errorf("root listing must not contain %q: %v", absent, names)
-				}
-			}
-		})
+	for _, want := range []string{"+COMPLETED", "+DELETED"} {
+		if !contains(names, want) {
+			t.Errorf("root listing missing %q: %v", want, names)
+		}
+	}
+	for _, absent := range []string{".+COMPLETED", ".+DELETED", "+DUE", "+ACTIVE"} {
+		if contains(names, absent) {
+			t.Errorf("root listing must not contain %q: %v", absent, names)
+		}
+	}
+
+	home, errno := fs.resolveChild("home")
+	if errno != 0 {
+		t.Fatalf("lookup home: %v", errno)
+	}
+	homeNames, errno := readdirOf(t, home.(*dirNode))
+	if errno != 0 {
+		t.Fatalf("Readdir home: %v", errno)
+	}
+	for _, want := range []string{"+COMPLETED", "+DELETED"} {
+		if !contains(homeNames, want) {
+			t.Errorf("project listing missing %q: %v", want, homeNames)
+		}
 	}
 }
 
-func TestVirtualTagViewDoesNotNestInEitherMode(t *testing.T) {
-	for _, hidden := range []bool{false, true} {
-		fs, _ := newTestFS(
-			[]backend.Task{task(uuidA, "Chore", "home")},
-			[]backend.Task{task(uuidA, "Old chore", "home")},
-			[]string{"home"},
-			[]string{},
-			[]string{"COMPLETED", "DUE"},
-			Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED", "DUE"}, Hidden: hidden},
-		)
-		completed, errno := fs.resolveChild("+COMPLETED")
-		if errno != 0 {
-			t.Fatalf("lookup +COMPLETED: %v", errno)
-		}
-		names, errno := readdirOf(t, completed.(*dirNode))
-		if errno != 0 {
-			t.Fatalf("Readdir +COMPLETED: %v", errno)
-		}
-		for _, absent := range []string{"+COMPLETED", "+DUE", ".+COMPLETED", ".+DUE"} {
-			if contains(names, absent) {
-				t.Errorf("virtual-tag view lists %q: %v", absent, names)
-			}
+func TestVirtualTagViewDoesNotNest(t *testing.T) {
+	fs, _ := newTestFS(
+		[]backend.Task{task(uuidA, "Chore", "home")},
+		[]backend.Task{task(uuidA, "Old chore", "home")},
+		[]string{"home"}, []string{})
+	completed, errno := fs.resolveChild("+COMPLETED")
+	if errno != 0 {
+		t.Fatalf("lookup +COMPLETED: %v", errno)
+	}
+	names, errno := readdirOf(t, completed.(*dirNode))
+	if errno != 0 {
+		t.Fatalf("Readdir +COMPLETED: %v", errno)
+	}
+	for _, absent := range []string{"+COMPLETED", "+DELETED", ".+COMPLETED", ".+DELETED"} {
+		if contains(names, absent) {
+			t.Errorf("virtual-tag view lists %q: %v", absent, names)
 		}
 	}
 }
 
 func TestSelfVirtualTagNotListed(t *testing.T) {
 	fs, _ := newTestFS(
-		[]backend.Task{task(uuidA, "Old chore", "home")},
-		[]backend.Task{task(uuidA, "Old chore", "home")},
-		[]string{"home"},
-		[]string{},
-		[]string{"COMPLETED", "DUE"},
-	)
-	completed, errno := fs.resolveChild(".+COMPLETED")
+		[]backend.Task{task(uuidA, "Old chore", "home")}, []backend.Task{task(uuidA, "Old chore", "home")}, []string{"home"}, []string{})
+	completed, errno := fs.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
 	names, errno := readdirOf(t, completed.(*dirNode))
 	if errno != 0 {
-		t.Fatalf("Readdir .+COMPLETED: %v", errno)
+		t.Fatalf("Readdir +COMPLETED: %v", errno)
 	}
-	if contains(names, ".+COMPLETED") {
+	if contains(names, "+COMPLETED") {
 		t.Errorf("virtual-tag view lists itself: %v", names)
 	}
-	if contains(names, ".+DUE") {
+	if contains(names, "+DELETED") {
 		t.Errorf("virtual-tag views must not nest, or recursive walks explode: %v", names)
 	}
 }
@@ -1188,7 +1037,7 @@ func TestDeclaredTagNotListedInsideItself(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	fs := New(backend.NewQuery(runner), Config{RemoveAction: backend.RemoveDelete, VirtualTags: []string{"COMPLETED"}, Hidden: true})
+	fs := New(backend.NewQuery(runner), Config{RemoveAction: backend.RemoveDelete})
 	if _, errno := fs.declareChild("+next"); errno != 0 {
 		t.Fatalf("declare +next: %v", errno)
 	}
@@ -1210,12 +1059,7 @@ func TestRootListsOnlyProjectlessTasks(t *testing.T) {
 		[]backend.Task{
 			task(uuidA, "Less nested project", "this.is"),
 			task(uuidB, "Inbox item", ""),
-		},
-		nil,
-		[]string{"this.is"},
-		[]string{},
-		[]string{"COMPLETED"},
-	)
+		}, nil, []string{"this.is"}, []string{})
 	stream, errno := fs.Readdir(context.Background())
 	if errno != 0 {
 		t.Fatalf("Readdir root: %v", errno)
@@ -1234,12 +1078,7 @@ func TestTagViewListsAllDepths(t *testing.T) {
 		[]backend.Task{
 			task(uuidA, "Deep task", "home.clean-garage", "next"),
 			task(uuidB, "Flat task", "", "next"),
-		},
-		nil,
-		[]string{"home.clean-garage"},
-		[]string{"next"},
-		[]string{"COMPLETED"},
-	)
+		}, nil, []string{"home.clean-garage"}, []string{"next"})
 	nextNode, errno := fs.resolveChild("+next")
 	if errno != 0 {
 		t.Fatalf("lookup +next: %v", errno)
@@ -1292,7 +1131,7 @@ func newSweepFSWithAction(action backend.RemoveAction, tasks ...backend.Task) (*
 func newSweepFSWithViews(action backend.RemoveAction, views []View, tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
 	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
 	runner := &fakeRunner{fn: db.serve}
-	fs := New(backend.NewQuery(runner), Config{RemoveAction: action, VirtualTags: []string{"COMPLETED", "PENDING", "DUE", "DELETED"}, Hidden: true, Views: views})
+	fs := New(backend.NewQuery(runner), Config{RemoveAction: action, Views: views})
 	return fs, runner, db
 }
 
@@ -1614,49 +1453,42 @@ func TestRmdirTombstonedProjectSucceeds(t *testing.T) {
 func TestRmdirVirtualTagViewNeedsEmptyView(t *testing.T) {
 	fs, runner, db := newSweepFS(
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Old chore", Project: "this", Status: "completed"},
 	)
 	thisNode, errno := fs.resolveChild("this")
 	if errno != 0 {
 		t.Fatalf("lookup this: %v", errno)
 	}
-	if errno := thisNode.(*dirNode).Rmdir(context.Background(), ".+PENDING"); errno != syscall.ENOTEMPTY {
+	if errno := thisNode.(*dirNode).Rmdir(context.Background(), "+COMPLETED"); errno != syscall.ENOTEMPTY {
 		t.Fatalf("rmdir view with tasks: errno = %v, want ENOTEMPTY", errno)
 	}
 	if n := mutationCount(runner); n != 0 {
 		t.Errorf("non-destructive view rmdir issued %d mutations", n)
 	}
-	db.tasks[0].Status = "deleted"
-	if errno := thisNode.(*dirNode).Rmdir(context.Background(), ".+PENDING"); errno != 0 {
+	db.tasks[1].Status = "deleted"
+	if errno := thisNode.(*dirNode).Rmdir(context.Background(), "+COMPLETED"); errno != 0 {
 		t.Errorf("rmdir emptied view: %v", errno)
 	}
 }
 
-func TestRmdirVirtualTagViewBothSpellings(t *testing.T) {
-	fs, runner, db := newSweepFS(
+func TestRmdirDotVirtualTagViewIsENOENT(t *testing.T) {
+	fs, runner, _ := newSweepFS(
 		backend.Task{UUID: uuidA, Description: "Chore", Project: "this", Status: "pending"},
+		backend.Task{UUID: uuidB, Description: "Old chore", Project: "this", Status: "completed"},
 	)
 	thisNode, errno := fs.resolveChild("this")
 	if errno != 0 {
 		t.Fatalf("lookup this: %v", errno)
 	}
-	this := thisNode.(*dirNode)
-	for _, spelling := range []string{"+PENDING", ".+PENDING"} {
-		if errno := this.Rmdir(context.Background(), spelling); errno != syscall.ENOTEMPTY {
-			t.Fatalf("rmdir %s with tasks: errno = %v, want ENOTEMPTY", spelling, errno)
-		}
+	if errno := thisNode.(*dirNode).Rmdir(context.Background(), ".+COMPLETED"); errno != syscall.ENOENT {
+		t.Errorf("rmdir .+COMPLETED: errno = %v, want ENOENT", errno)
 	}
 	if n := mutationCount(runner); n != 0 {
-		t.Errorf("non-destructive view rmdir issued %d mutations", n)
-	}
-	db.tasks[0].Status = "deleted"
-	for _, spelling := range []string{"+PENDING", ".+PENDING"} {
-		if errno := this.Rmdir(context.Background(), spelling); errno != 0 {
-			t.Errorf("rmdir emptied view %s: %v", spelling, errno)
-		}
+		t.Errorf("rejected view rmdir issued %d mutations", n)
 	}
 }
 
-func TestRmRfWalkThroughHiddenViews(t *testing.T) {
+func TestRmRfWalkThroughStatusViews(t *testing.T) {
 	fs, runner, db := newSweepFS(
 		backend.Task{UUID: uuidA, Description: "Do taxes", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old taxes", Project: "this", Status: "completed"},
@@ -1671,20 +1503,23 @@ func TestRmRfWalkThroughHiddenViews(t *testing.T) {
 	if errno := this.Unlink(context.Background(), pendingName); errno != 0 {
 		t.Fatalf("unlink pending file: %v", errno)
 	}
-	if errno := this.Rmdir(context.Background(), ".+PENDING"); errno != 0 {
-		t.Fatalf("rmdir .+PENDING: %v", errno)
+	if errno := this.Rmdir(context.Background(), "+COMPLETED"); errno != syscall.ENOTEMPTY {
+		t.Fatalf("rmdir completed view before its file is unlinked: errno = %v, want ENOTEMPTY", errno)
 	}
 
 	completedName := naming.FileName("Old taxes", uuidB)
-	completedView, errno := this.resolveChild(".+COMPLETED")
+	completedView, errno := this.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
 	if errno := completedView.(*dirNode).Unlink(context.Background(), completedName); errno != 0 {
 		t.Fatalf("unlink completed file: %v", errno)
 	}
-	if errno := this.Rmdir(context.Background(), ".+COMPLETED"); errno != 0 {
-		t.Fatalf("rmdir .+COMPLETED: %v", errno)
+	if errno := this.Rmdir(context.Background(), "+COMPLETED"); errno != 0 {
+		t.Fatalf("rmdir +COMPLETED: %v", errno)
+	}
+	if errno := this.Rmdir(context.Background(), "+DELETED"); errno != 0 {
+		t.Fatalf("rmdir +DELETED: %v", errno)
 	}
 
 	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
@@ -1714,18 +1549,18 @@ func TestRmdirVirtualTagViewUnderComplete(t *testing.T) {
 	}
 	this := thisNode.(*dirNode)
 
-	if errno := this.Rmdir(context.Background(), ".+PENDING"); errno != syscall.ENOTEMPTY {
-		t.Fatalf("rmdir actionable view: errno = %v, want ENOTEMPTY", errno)
-	}
-	if errno := this.Rmdir(context.Background(), ".+COMPLETED"); errno != 0 {
+	if errno := this.Rmdir(context.Background(), "+COMPLETED"); errno != 0 {
 		t.Fatalf("rmdir completed view: %v", errno)
+	}
+	if errno := this.Rmdir(context.Background(), "+DELETED"); errno != 0 {
+		t.Fatalf("rmdir deleted view: %v", errno)
 	}
 	if n := mutationCount(runner); n != 0 {
 		t.Errorf("view rmdir issued %d mutations", n)
 	}
 }
 
-func TestRmRfWalkThroughHiddenViewsUnderComplete(t *testing.T) {
+func TestRmRfWalkThroughStatusViewsUnderComplete(t *testing.T) {
 	fs, runner, db := newSweepFSWithAction(backend.RemoveComplete,
 		backend.Task{UUID: uuidA, Description: "Do taxes", Project: "this", Status: "pending"},
 		backend.Task{UUID: uuidB, Description: "Old taxes", Project: "this", Status: "completed"},
@@ -1740,21 +1575,21 @@ func TestRmRfWalkThroughHiddenViewsUnderComplete(t *testing.T) {
 	if errno := this.Unlink(context.Background(), pendingName); errno != 0 {
 		t.Fatalf("unlink pending file: %v", errno)
 	}
-	if errno := this.Rmdir(context.Background(), ".+PENDING"); errno != 0 {
-		t.Fatalf("rmdir .+PENDING: %v", errno)
-	}
 
-	completedView, errno := this.resolveChild(".+COMPLETED")
+	completedView, errno := this.resolveChild("+COMPLETED")
 	if errno != 0 {
-		t.Fatalf("lookup .+COMPLETED: %v", errno)
+		t.Fatalf("lookup +COMPLETED: %v", errno)
 	}
 	for _, name := range []string{naming.FileName("Do taxes", uuidA), naming.FileName("Old taxes", uuidB)} {
 		if errno := completedView.(*dirNode).Unlink(context.Background(), name); errno != 0 {
 			t.Fatalf("unlink completed file %q: %v", name, errno)
 		}
 	}
-	if errno := this.Rmdir(context.Background(), ".+COMPLETED"); errno != 0 {
-		t.Fatalf("rmdir .+COMPLETED: %v", errno)
+	if errno := this.Rmdir(context.Background(), "+COMPLETED"); errno != 0 {
+		t.Fatalf("rmdir +COMPLETED: %v", errno)
+	}
+	if errno := this.Rmdir(context.Background(), "+DELETED"); errno != 0 {
+		t.Fatalf("rmdir +DELETED: %v", errno)
 	}
 
 	if errno := fs.Rmdir(context.Background(), "this"); errno != 0 {
@@ -1820,9 +1655,9 @@ func TestUnlinkDeletedTaskIsNoop(t *testing.T) {
 				t.Fatalf("lookup home: %v", errno)
 			}
 			homeNode := home.(*dirNode)
-			deletedView, errno := homeNode.resolveChild(".+DELETED")
+			deletedView, errno := homeNode.resolveChild("+DELETED")
 			if errno != 0 {
-				t.Fatalf("lookup .+DELETED: %v", errno)
+				t.Fatalf("lookup +DELETED: %v", errno)
 			}
 			name := naming.FileName("Gone", uuidA)
 			if errno := deletedView.(*dirNode).Unlink(context.Background(), name); errno != 0 {
@@ -1941,8 +1776,6 @@ func newDynamicViewFS(action backend.RemoveAction, render func(context.Context, 
 	runner := &fakeRunner{fn: db.serve}
 	f := New(backend.NewQuery(runner), Config{
 		RemoveAction: action,
-		VirtualTags:  []string{"COMPLETED", "PENDING", "DUE", "DELETED"},
-		Hidden:       true,
 		Views:        []View{{Name: "Dynamic", Filter: "unused"}},
 		RenderView:   render,
 	})
@@ -2079,14 +1912,14 @@ func TestCustomViewDirectoryIsLookupOnly(t *testing.T) {
 	for _, absent := range []string{
 		"home",
 		"+next",
-		".+COMPLETED",
+		"+COMPLETED",
 		naming.FileName("Other task", "c9d0e1f2-2222-2222-2222-222222222222"),
 	} {
 		if contains(names, absent) {
 			t.Errorf("custom view listing contains %q: %v", absent, names)
 		}
 	}
-	for _, name := range []string{"home", "+next", ".+COMPLETED"} {
+	for _, name := range []string{"home", "+next", "+COMPLETED"} {
 		if _, errno := vn.resolveChild(context.Background(), name, false); errno != syscall.ENOENT {
 			t.Errorf("custom view lookup %q: errno = %v, want ENOENT", name, errno)
 		}

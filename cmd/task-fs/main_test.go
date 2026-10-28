@@ -16,30 +16,29 @@ func TestParseMountFlags(t *testing.T) {
 		name       string
 		args       []string
 		mountpoint string
-		selection  string
-		hidden     bool
 		action     backend.RemoveAction
 		views      []vfs.View
 		wantErr    bool
 	}{
-		{"mountpoint only", []string{"/mnt"}, "/mnt", "", false, backend.RemoveComplete, nil, false},
-		{"long flags before mountpoint", []string{"--virtual-tags", "COMPLETED,DUE", "--virtual-hidden", "/mnt"}, "/mnt", "COMPLETED,DUE", true, backend.RemoveComplete, nil, false},
-		{"short flags after mountpoint", []string{"/mnt", "-t", "ALL", "-H"}, "/mnt", "ALL", true, backend.RemoveComplete, nil, false},
-		{"mixed positions", []string{"-H", "/mnt", "--virtual-tags=COMPLETED"}, "/mnt", "COMPLETED", true, backend.RemoveComplete, nil, false},
-		{"rm delete after mountpoint", []string{"/mnt", "--rm", "delete"}, "/mnt", "", false, backend.RemoveDelete, nil, false},
-		{"rm delete before mountpoint", []string{"--rm", "delete", "/mnt"}, "/mnt", "", false, backend.RemoveDelete, nil, false},
-		{"rm complete with equals", []string{"--rm=complete", "/mnt"}, "/mnt", "", false, backend.RemoveComplete, nil, false},
-		{"view after mountpoint", []string{"/mnt", "--view", "Due Next Week=status:pending sched.after:sonw sched.before:eonw"}, "/mnt", "", false, backend.RemoveComplete, []vfs.View{{Name: "Due Next Week", Filter: "status:pending sched.after:sonw sched.before:eonw"}}, false},
-		{"view before mountpoint", []string{"--view", "@Due=due.before:now", "/mnt"}, "/mnt", "", false, backend.RemoveComplete, []vfs.View{{Name: "Due", Filter: "due.before:now"}}, false},
-		{"repeated views", []string{"/mnt", "--view", "Due=a", "--view", "Status=status=pending"}, "/mnt", "", false, backend.RemoveComplete, []vfs.View{{Name: "Due", Filter: "a"}, {Name: "Status", Filter: "status=pending"}}, false},
-		{"old query flag rejected", []string{"/mnt", "--query", "Due=a"}, "", "", false, "", nil, true},
-		{"invalid rm value", []string{"/mnt", "--rm", "archive"}, "", "", false, "", nil, true},
-		{"missing mountpoint", []string{"--virtual-hidden"}, "", "", false, "", nil, true},
-		{"two mountpoints", []string{"/a", "/b"}, "", "", false, "", nil, true},
+		{"mountpoint only", []string{"/mnt"}, "/mnt", backend.RemoveComplete, nil, false},
+		{"rm delete after mountpoint", []string{"/mnt", "--rm", "delete"}, "/mnt", backend.RemoveDelete, nil, false},
+		{"rm delete before mountpoint", []string{"--rm", "delete", "/mnt"}, "/mnt", backend.RemoveDelete, nil, false},
+		{"rm complete with equals", []string{"--rm=complete", "/mnt"}, "/mnt", backend.RemoveComplete, nil, false},
+		{"view after mountpoint", []string{"/mnt", "--view", "Due Next Week=status:pending sched.after:sonw sched.before:eonw"}, "/mnt", backend.RemoveComplete, []vfs.View{{Name: "Due Next Week", Filter: "status:pending sched.after:sonw sched.before:eonw"}}, false},
+		{"view before mountpoint", []string{"--view", "@Due=due.before:now", "/mnt"}, "/mnt", backend.RemoveComplete, []vfs.View{{Name: "Due", Filter: "due.before:now"}}, false},
+		{"repeated views", []string{"/mnt", "--view", "Due=a", "--view", "Status=status=pending"}, "/mnt", backend.RemoveComplete, []vfs.View{{Name: "Due", Filter: "a"}, {Name: "Status", Filter: "status=pending"}}, false},
+		{"old query flag rejected", []string{"/mnt", "--query", "Due=a"}, "", "", nil, true},
+		{"removed virtual-tags flag rejected", []string{"/mnt", "--virtual-tags", "COMPLETED,DUE"}, "", "", nil, true},
+		{"removed shorthand t flag rejected", []string{"/mnt", "-t", "ALL"}, "", "", nil, true},
+		{"removed virtual-hidden flag rejected", []string{"/mnt", "--virtual-hidden"}, "", "", nil, true},
+		{"removed shorthand H flag rejected", []string{"/mnt", "-H"}, "", "", nil, true},
+		{"invalid rm value", []string{"/mnt", "--rm", "archive"}, "", "", nil, true},
+		{"missing mountpoint", []string{"--rm", "delete"}, "", "", nil, true},
+		{"two mountpoints", []string{"/a", "/b"}, "", "", nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mp, selection, hidden, action, views, err := parseMountFlags(tt.args)
+			mp, action, views, err := parseMountFlags(tt.args)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseMountFlags(%v) = %q, want error", tt.args, mp)
@@ -49,9 +48,9 @@ func TestParseMountFlags(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseMountFlags(%v): %v", tt.args, err)
 			}
-			if mp != tt.mountpoint || selection != tt.selection || hidden != tt.hidden || action != tt.action || !reflect.DeepEqual(views.views, tt.views) {
-				t.Errorf("parseMountFlags(%v) = (%q, %q, %v, %q, %v), want (%q, %q, %v, %q, %v)",
-					tt.args, mp, selection, hidden, action, views.views, tt.mountpoint, tt.selection, tt.hidden, tt.action, tt.views)
+			if mp != tt.mountpoint || action != tt.action || !reflect.DeepEqual(views.views, tt.views) {
+				t.Errorf("parseMountFlags(%v) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.args, mp, action, views.views, tt.mountpoint, tt.action, tt.views)
 			}
 		})
 	}
@@ -212,21 +211,21 @@ func TestValidateViewsReportsDynamicFailures(t *testing.T) {
 }
 
 func TestReorderFlagsKeepsFlagValuesTogether(t *testing.T) {
-	got := reorderFlags([]string{"/mnt", "-t", "COMPLETED,DUE", "--virtual-hidden", "x"})
-	want := []string{"-t", "COMPLETED,DUE", "--virtual-hidden", "/mnt", "x"}
+	got := reorderFlags([]string{"/mnt", "--rm", "delete", "x"})
+	want := []string{"--rm", "delete", "/mnt", "x"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("reorderFlags = %v, want %v", got, want)
 	}
 
-	got = reorderFlags([]string{"/mnt", "--rm", "delete", "--virtual-hidden"})
-	want = []string{"--rm", "delete", "--virtual-hidden", "/mnt"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("reorderFlags with --rm = %v, want %v", got, want)
-	}
-
-	got = reorderFlags([]string{"/mnt", "--view", "Due Next Week=status:pending", "--virtual-hidden"})
-	want = []string{"--view", "Due Next Week=status:pending", "--virtual-hidden", "/mnt"}
+	got = reorderFlags([]string{"/mnt", "--view", "Due Next Week=status:pending", "x"})
+	want = []string{"--view", "Due Next Week=status:pending", "/mnt", "x"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("reorderFlags with --view = %v, want %v", got, want)
+	}
+
+	got = reorderFlags([]string{"/mnt", "-t", "COMPLETED", "x"})
+	want = []string{"-t", "/mnt", "COMPLETED", "x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("reorderFlags with removed -t = %v, want %v", got, want)
 	}
 }

@@ -30,24 +30,17 @@ databases work through the environment:
 TASKDATA=$HOME/other-tasks task-fs mount ~/c/TaskFS
 ```
 
-Two flags shape the virtual-tag views (the uppercase Taskwarrior-derived
-filters such as `COMPLETED` and `DUE`):
+Every mount exposes two virtual-tag views: `+COMPLETED` and `+DELETED`.
+They are always listed, even on an empty database, because moving a task
+into either one is how you complete or delete it. Other Taskwarrior derived
+filters, such as `DUE` or `OVERDUE`, are custom views:
 
 ```sh
-task-fs mount ~/c/TaskFS --virtual-tags "COMPLETED,OVERDUE,DUE,PENDING,ACTIVE"
-task-fs mount ~/c/TaskFS --virtual-hidden
+task-fs mount ~/c/TaskFS --view 'Due=+DUE'
 ```
 
-- `--virtual-tags` (`-t`) takes a comma-separated list of virtual tags
-  without the `+` sign, or `ALL` for every derived filter your Taskwarrior
-  knows. The default is `COMPLETED,OVERDUE,DUE,ACTIVE,WAITING`. Every entry
-  is validated against what Taskwarrior discovers, and an unknown name
-  aborts the mount.
-- `--virtual-hidden` (`-H`) presents the virtual-tag views as hidden
-  `.+NAME` directories; without it they are ordinary `+NAME` directories.
-  Both spellings resolve on lookup no matter how they are listed. The old
-  behavior — every discovered virtual tag, hidden — is
-  `--virtual-hidden --virtual-tags ALL`.
+The former `--virtual-tags`/`-t` and `--virtual-hidden`/`-H` flags are
+removed; passing either now aborts the mount with a usage error.
 
 A third flag selects what removing a task does:
 
@@ -78,6 +71,8 @@ task-fs mount ~/c/TaskFS \
   validated against Taskwarrior at mount time; a malformed filter aborts the
   mount, while a valid filter that matches no tasks yields an empty
   `@NAME` directory.
+- A filter may use a Taskwarrior virtual tag directly, so `--view 'Due=+DUE'`
+  covers derived filters that are not built into the tree.
 - A filter may contain one or more `{{ command }}` blocks. Each command runs
   through `/bin/sh -c` in the mount environment, and its trimmed standard
   output replaces the block as filter text. Use a backslash to keep literal
@@ -169,9 +164,6 @@ generated service command, so a `--view` value can be written naturally:
 
 ```nix
 services.task-fs.automount.mountFlags = [
-  "--virtual-tags"
-  "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING"
-  "--virtual-hidden"
   "--view"
   "Due Next Week=status:pending sched.after:sonw sched.before:eonw"
 ];
@@ -213,13 +205,12 @@ these two paths are the same view:
 - **Tag segments** (`+next`, `+shopping`, ...) filter to tasks carrying the
   tag. Tag views without a project segment (e.g. `/+next`) list matching
   tasks of every project depth.
-- **Uppercase `+` segments are virtual tags**: `+COMPLETED`, `+DUE`,
-  `+OVERDUE`, ... — Taskwarrior's derived filters. Which ones exist is
-  chosen at mount time with `--virtual-tags` (above). Each selected view
-  can also be spelled with a dot prefix (`.+COMPLETED`); the dot form is
-  how they are listed under `--virtual-hidden`, where they are hidden
-  files so plain `ls` and file managers hide them — use `ls -a` or the
-  "show hidden files" toggle to see them.
+- **`+COMPLETED` and `+DELETED` are virtual tags**: they map to
+  Taskwarrior's completed and deleted status filters and are always present
+  in every filter directory. They are the only built-in virtual-tag views.
+  Other derived filters (`+DUE`, `+OVERDUE`, ...) are not listed by the tree;
+  define them as custom views (`--view 'Due=+DUE'`). The dot-prefixed
+  spellings `.+COMPLETED` and `.+DELETED` no longer resolve.
 - **`@` segments are custom views**: `@Due Next Week`, `@Overdue`, ...
   exist only at the root, for custom views configured with `--view` (above).
   They are lookup views, not filter directories: their entries are the
@@ -269,8 +260,8 @@ to task annotations.
 | `touch "Description"` | Adds a task with the current directory's project and tags. |
 | `rm <taskfile>` | Applies the configured `--rm` action: completes the task by default, deletes it with `--rm delete`. |
 | `rmdir <dir>` / `rm -rf <dir>` | Applies the same configured action to every task matching the directory's filter. |
-| `mv <taskfile> +COMPLETED/` | Completes the task (rest of the destination path is ignored; `.+COMPLETED/` works too). |
-| `mv <taskfile> +DELETED/` | Deletes the task (rest of the destination path is ignored; `.+DELETED/` works too; the view must be selected with `--virtual-tags`). |
+| `mv <taskfile> +COMPLETED/` | Completes the task (rest of the destination path is ignored). |
+| `mv <taskfile> +DELETED/` | Deletes the task (rest of the destination path is ignored). |
 | `mv <taskfile> out of +COMPLETED or +DELETED` | Reopens the task and applies the destination's project/tags. |
 | `mv <taskfile> <other-dir>` | The task's project and tags match the destination: projects set exactly (moving to a parent drops the subproject), tags added or removed per the filter delta. |
 | `mv <taskfile> /new/deep/dir` (no trailing slash) | The final component is minted as a new project segment, provided the parent path exists. |
@@ -280,19 +271,21 @@ to task annotations.
 
 Notes:
 
-- Creating a task inside a virtual-tag view works: virtual tags are dropped
-  from the write filter (`touch x` in `/home/+DUE` creates a task in
+- Creating a task inside a status view works: virtual tags are dropped from
+  the write filter (`touch x` in `/home/+COMPLETED` creates a task in
   `home`), so the new file appears one level up.
 - `mv` is a filter delta: moving from `/home/+next` to `/finances/+urgent`
   sets project `finances`, removes `next`, adds `urgent`. Renaming a task
   file (changing its description) is not supported in this version.
-- Moving into a read-only virtual-tag view (`+DUE`, `+OVERDUE`, ...) fails,
-  since those statuses are derived, not assignable.
+- Only `+COMPLETED` and `+DELETED` are virtual-tag destinations. Any other
+  uppercase `+` name is an ordinary tag, and custom view directories are
+  read-only.
 - `mkdir` declarations last for the mount session only; once a task lands
   there the directory exists from the task data itself.
 - Removing a project or tag directory applies the configured action to every
-  matching task in its subtree. Removing a virtual-tag directory never changes
-  tasks; it succeeds once the view has nothing left for the action to change.
+  matching task in its subtree. Removing `+COMPLETED` or `+DELETED` never
+  changes tasks; it succeeds once the view has nothing left for the action to
+  change.
 - Custom view directories support reading tasks and removing them. `rm` on a task
   file applies the configured action, but `touch`, `mkdir`, and `mv` are rejected. `rm -rf
   "@Due Next Week"` unlinks the matching files under that action and then

@@ -3,6 +3,7 @@ package backend
 import (
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,13 @@ func TestRunnerErrorWhenMissing(t *testing.T) {
 	}
 }
 
+func extendPath(f Filter, seg string) (Filter, error) {
+	if strings.HasPrefix(seg, "+") && IsVirtualTag(seg[1:]) {
+		return f.WithVirtualSegment(seg)
+	}
+	return f.WithSegment(seg)
+}
+
 func TestFilterRender(t *testing.T) {
 	tests := []struct {
 		name string
@@ -58,19 +66,20 @@ func TestFilterRender(t *testing.T) {
 		{"project", []string{"home"}, []string{"project:home", "status:pending"}},
 		{"subproject", []string{"home", "clean-garage"}, []string{"project:home.clean-garage", "status:pending"}},
 		{"tag", []string{"+next"}, []string{"+next", "status:pending"}},
-		{"virtual tag verbatim", []string{".+DUE"}, []string{"+DUE", "status:pending"}},
-		{"completed", []string{".+COMPLETED", "home"}, []string{"project:home", "status:completed"}},
+		{"deleted", []string{"+DELETED"}, []string{"status:deleted"}},
+		{"completed", []string{"+COMPLETED", "home"}, []string{"project:home", "status:completed"}},
 		{"order free", []string{"home", "+next"}, []string{"project:home", "+next", "status:pending"}},
-		{"deep", []string{"finances", "2026-taxes", "+urgent", ".+DUE"}, []string{"project:finances.2026-taxes", "+urgent", "+DUE", "status:pending"}},
+		{"deep", []string{"finances", "2026-taxes", "+urgent", "+COMPLETED"}, []string{"project:finances.2026-taxes", "+urgent", "status:completed"}},
+		{"uppercase non-status tag", []string{"+DUE"}, []string{"+DUE", "status:pending"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var f Filter
 			var err error
 			for _, seg := range tt.path {
-				f, err = f.WithSegment(seg)
+				f, err = extendPath(f, seg)
 				if err != nil {
-					t.Fatalf("WithSegment(%q): %v", seg, err)
+					t.Fatalf("extendPath(%q): %v", seg, err)
 				}
 			}
 			got := f.Render()
@@ -93,18 +102,31 @@ func TestFilterSegmentErrors(t *testing.T) {
 		t.Error("expected error re-adding same project")
 	}
 	var err error
-	f, err = f.WithSegment(".+DUE")
+	f, err = f.WithVirtualSegment("+COMPLETED")
 	if err != nil {
 		t.Fatalf("add virtual tag: %v", err)
 	}
-	if _, err := f.WithSegment(".+DUE"); err == nil {
+	if _, err := f.WithVirtualSegment("+COMPLETED"); err == nil {
 		t.Error("expected error re-adding same virtual tag")
+	}
+	if _, err := f.WithVirtualSegment(".+COMPLETED"); err == nil {
+		t.Error("expected error for dot-prefixed virtual tag")
+	}
+	if _, err := f.WithVirtualSegment("+DUE"); err == nil {
+		t.Error("expected error for non-status virtual tag")
 	}
 	if _, err := f.WithSegment(".hidden"); err == nil {
 		t.Error("expected error for dot-prefixed segment")
 	}
-	if _, err := f.WithSegment(".+due"); err == nil {
-		t.Error("expected error for lowercase virtual-tag segment")
+	if _, err := f.WithSegment(".+COMPLETED"); err == nil {
+		t.Error("expected error for dot-prefixed segment")
+	}
+	tagged, err := f.WithSegment("+DUE")
+	if err != nil {
+		t.Fatalf("uppercase tag segment: %v", err)
+	}
+	if !reflect.DeepEqual(tagged.Tags, []string{"next", "DUE"}) {
+		t.Errorf("tags = %v, want [next DUE]", tagged.Tags)
 	}
 	if _, err := f.WithSegment(""); err == nil {
 		t.Error("expected error for empty segment")
@@ -115,7 +137,7 @@ func TestWriteFilterDropsVirtualTags(t *testing.T) {
 	var f Filter
 	f, _ = f.WithSegment("home")
 	f, _ = f.WithSegment("+next")
-	f, _ = f.WithSegment(".+DUE")
+	f, _ = f.WithVirtualSegment("+COMPLETED")
 	w := f.WriteFilter()
 	got := w.Render()
 	want := []string{"project:home", "+next", "status:pending"}
@@ -133,17 +155,17 @@ func TestFilterRenderSweep(t *testing.T) {
 		{"root", nil, []string{"status.not:deleted"}},
 		{"project", []string{"home"}, []string{"project:home", "status.not:deleted"}},
 		{"tagged", []string{"home", "+next"}, []string{"project:home", "+next", "status.not:deleted"}},
-		{"completed view", []string{".+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted"}},
-		{"write filter drops virtual tags", []string{"home", ".+PENDING"}, []string{"project:home", "status.not:deleted"}},
+		{"completed view", []string{"+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted"}},
+		{"write filter drops virtual tags", []string{"home", "+COMPLETED"}, []string{"project:home", "status.not:deleted"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var f Filter
 			var err error
 			for _, seg := range tt.path {
-				f, err = f.WithSegment(seg)
+				f, err = extendPath(f, seg)
 				if err != nil {
-					t.Fatalf("WithSegment(%q): %v", seg, err)
+					t.Fatalf("extendPath(%q): %v", seg, err)
 				}
 			}
 			got := f.RenderSweep(RemoveDelete)
@@ -164,16 +186,16 @@ func TestFilterRenderSweepComplete(t *testing.T) {
 		want []string
 	}{
 		{"root", nil, []string{"status.not:deleted", "status.not:completed"}},
-		{"completed view", []string{".+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted", "status.not:completed"}},
+		{"completed view", []string{"+COMPLETED", "home"}, []string{"project:home", "status:completed", "status.not:deleted", "status.not:completed"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var f Filter
 			var err error
 			for _, seg := range tt.path {
-				f, err = f.WithSegment(seg)
+				f, err = extendPath(f, seg)
 				if err != nil {
-					t.Fatalf("WithSegment(%q): %v", seg, err)
+					t.Fatalf("extendPath(%q): %v", seg, err)
 				}
 			}
 			got := f.RenderSweep(RemoveComplete)
@@ -203,58 +225,6 @@ func TestChildTags(t *testing.T) {
 	want := []string{"next", "shopping", "urgent"}
 	if !reflect.DeepEqual(tags, want) {
 		t.Errorf("tags = %v, want %v", tags, want)
-	}
-}
-
-func TestVirtualTagsFromDiscovery(t *testing.T) {
-	vts := VirtualTagsFromDiscovery([]string{"ACTIVE", "COMPLETED", "shopping", "OVERDUE", "", "ACTIVE"})
-	want := []string{"ACTIVE", "COMPLETED", "OVERDUE"}
-	if !reflect.DeepEqual(vts, want) {
-		t.Errorf("virtual tags = %v, want %v", vts, want)
-	}
-}
-
-func TestResolveVirtualTags(t *testing.T) {
-	discovered := []string{"ACTIVE", "COMPLETED", "DUE", "OVERDUE", "WAITING"}
-	tests := []struct {
-		name      string
-		selection string
-		want      []string
-		wantErr   bool
-	}{
-		{"default selection accepted", "COMPLETED,OVERDUE,DUE,ACTIVE,WAITING", []string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE", "WAITING"}, false},
-		{"explicit list", "COMPLETED,DUE", []string{"COMPLETED", "DUE"}, false},
-		{"ALL expands to discovery", "ALL", discovered, false},
-		{"whitespace trimmed", " COMPLETED , DUE ", []string{"COMPLETED", "DUE"}, false},
-		{"ALL mixed with entries", "ALL,COMPLETED", nil, true},
-		{"unknown entry", "COMPLETED,bogus", nil, true},
-		{"lowercase entry", "completed", nil, true},
-		{"empty entry", "COMPLETED,,DUE", nil, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveVirtualTags(tt.selection, discovered)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("ResolveVirtualTags(%q) = %v, want error", tt.selection, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ResolveVirtualTags(%q): %v", tt.selection, err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ResolveVirtualTags(%q) = %v, want %v", tt.selection, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultVirtualTagsIntersectsDiscovery(t *testing.T) {
-	got := DefaultVirtualTags([]string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE"})
-	want := []string{"COMPLETED", "OVERDUE", "DUE", "ACTIVE"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("DefaultVirtualTags = %v, want %v", got, want)
 	}
 }
 

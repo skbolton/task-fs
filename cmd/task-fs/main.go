@@ -18,7 +18,7 @@ import (
 	"task-fs/internal/view"
 )
 
-const usage = "usage: task-fs mount [--virtual-tags LIST | -t LIST] [--virtual-hidden | -H] [--rm complete|delete] [--view NAME=FILTER ...] <mountpoint>"
+const usage = "usage: task-fs mount [--rm complete|delete] [--view NAME=FILTER ...] <mountpoint>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -32,7 +32,7 @@ func run(args []string) error {
 		return fmt.Errorf("%s", usage)
 	}
 
-	mountpoint, selection, hidden, action, views, err := parseMountFlags(args[1:])
+	mountpoint, action, views, err := parseMountFlags(args[1:])
 	if err != nil {
 		return err
 	}
@@ -46,24 +46,8 @@ func run(args []string) error {
 	if err := validateViews(query, views, renderView); err != nil {
 		return err
 	}
-	entries, err := query.AllTags()
-	if err != nil {
-		return err
-	}
-	discovered := backend.VirtualTagsFromDiscovery(entries)
-	var selected []string
-	if selection == "" {
-		selected = backend.DefaultVirtualTags(discovered)
-	} else {
-		selected, err = backend.ResolveVirtualTags(selection, discovered)
-		if err != nil {
-			return err
-		}
-	}
 
 	root := vfs.New(query, vfs.Config{
-		VirtualTags:  selected,
-		Hidden:       hidden,
 		RemoveAction: action,
 		Views:        views.views,
 		RenderView:   renderView,
@@ -81,34 +65,29 @@ func run(args []string) error {
 
 // parseMountFlags parses the mount flags in any position relative to
 // the mountpoint, which the flag package alone does not support.
-func parseMountFlags(args []string) (mountpoint, selection string, hidden bool, action backend.RemoveAction, views compiledViews, err error) {
+func parseMountFlags(args []string) (mountpoint string, action backend.RemoveAction, views compiledViews, err error) {
 	var rmValue string
 	var viewValues viewFlag
 	flags := flag.NewFlagSet("mount", flag.ContinueOnError)
 	flags.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
-	flags.StringVar(&selection, "virtual-tags", "",
-		"comma-separated virtual tags to expose without the + sign, or ALL (default: "+backend.DefaultVirtualTagSelection+")")
-	flags.StringVar(&selection, "t", "", "shorthand for --virtual-tags")
-	flags.BoolVar(&hidden, "virtual-hidden", false, "present virtual-tag directories as hidden .+NAME entries")
-	flags.BoolVar(&hidden, "H", false, "shorthand for --virtual-hidden")
 	flags.StringVar(&rmValue, "rm", string(backend.RemoveComplete), "what removing a task does: complete or delete")
 	flags.Var(&viewValues, "view", "repeatable saved view as NAME=FILTER; {{ command }} blocks render when the view is browsed")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
-		return "", "", false, "", compiledViews{}, err
+		return "", "", compiledViews{}, err
 	}
 	rest := flags.Args()
 	if len(rest) != 1 {
-		return "", "", false, "", compiledViews{}, fmt.Errorf("%s", usage)
+		return "", "", compiledViews{}, fmt.Errorf("%s", usage)
 	}
 	action, err = backend.ParseRemoveAction(rmValue)
 	if err != nil {
-		return "", "", false, "", compiledViews{}, err
+		return "", "", compiledViews{}, err
 	}
 	views, err = parseViews(viewValues)
 	if err != nil {
-		return "", "", false, "", compiledViews{}, err
+		return "", "", compiledViews{}, err
 	}
-	return rest[0], selection, hidden, action, views, nil
+	return rest[0], action, views, nil
 }
 
 type viewFlag []string
@@ -201,11 +180,11 @@ func validateViews(query *backend.Query, views compiledViews, render func(contex
 }
 
 // reorderFlags moves flag tokens ahead of positional arguments so
-// `mount <mp> --virtual-tags ALL` parses. Only the value-taking flags
+// `mount <mp> --view NAME=FILTER` parses. Only the value-taking flags
 // below need their argument pulled along; everything else is position
 // independent.
 func reorderFlags(args []string) []string {
-	valueFlags := map[string]bool{"-t": true, "--virtual-tags": true, "--rm": true, "--view": true}
+	valueFlags := map[string]bool{"--rm": true, "--view": true}
 	var flagArgs, rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]

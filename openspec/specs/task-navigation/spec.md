@@ -8,7 +8,7 @@ Owns the directory tree of the mounted filesystem and its meaning as a task filt
 
 ### Requirement: Path segments are an order-free filter
 
-The system SHALL interpret a filesystem path as the conjunction of its segments' filters, where each segment starting with `+` is a tag filter, each segment starting with `.+` whose remainder is fully uppercase is a virtual-tag filter, and every other segment is a project filter. At the root, a segment matching a configured custom view name SHALL select that custom view directory instead of a project filter; custom view directories do not accumulate filters. The order of segments SHALL NOT change the resulting filter.
+The system SHALL interpret a filesystem path as the conjunction of its segments' filters, where a `+COMPLETED` or `+DELETED` segment is a status virtual-tag filter, any other segment starting with `+` is a tag filter, and every other segment is a project filter. At the root, a segment matching a configured custom view name SHALL select that custom view directory instead of a project filter; custom view directories do not accumulate filters. The order of segments SHALL NOT change the resulting filter.
 
 #### Scenario: Equivalent paths in any order
 
@@ -41,12 +41,12 @@ A project segment SHALL filter to tasks whose project is that segment or any dot
 
 ### Requirement: Root lists the filter vocabulary of pending tasks
 
-The root directory SHALL list one entry per first-level project segment, one entry per tag of pending tasks, one entry per virtual tag selected at mount time in its presentation form, and one file per pending task that has no project.
+The root directory SHALL list one entry per first-level project segment, one entry per tag of pending tasks, the `+COMPLETED` and `+DELETED` virtual-tag views, and one file per pending task that has no project.
 
 #### Scenario: Root of the example database
 
 - **WHEN** pending tasks exist in projects `home.clean-garage` and `finances.2026-taxes`, with task `home.clean-garage` tagged `next`
-- **THEN** the root listing contains the directories `home`, `finances`, and `+next`, and the selected virtual-tag directories such as `+COMPLETED` in their presentation form
+- **THEN** the root listing contains the directories `home`, `finances`, `+next`, `+COMPLETED`, and `+DELETED`
 
 ### Requirement: Paths without a status segment mean pending
 
@@ -57,43 +57,42 @@ The system SHALL filter a filter directory to `status:pending` unless the path c
 - **WHEN** a task is completed and the user lists its project directory outside `+COMPLETED`
 - **THEN** the completed task's file does not appear
 
-### Requirement: Virtual-tag segments expose derived filters
+### Requirement: Status virtual-tag segments expose derived filters
 
-The system SHALL support `+` segments as virtual-tag filters mapping to Taskwarrior virtual tags — entries named `+COMPLETED`, `.+DUE`, `.+OVERDUE`, and similar — including `+COMPLETED` (completed status) and the read-only filters Taskwarrior derives. A virtual-tag view SHALL resolve under both the `+NAME` and `.+NAME` spelling of a virtual tag selected at mount time, regardless of the presentation mode, and SHALL NOT resolve for a virtual tag that is not selected. Entries SHALL be listed only in the presentation form chosen at mount time: `+NAME` by default and `.+NAME` with hidden presentation. The dot form makes virtual-tag entries hidden files, so file managers and `ls` can toggle their visibility.
+The system SHALL support `+COMPLETED` and `+DELETED` as the only virtual-tag segments, mapping to Taskwarrior's completed and deleted status filters. Both SHALL resolve in every filter directory, including directories reached through project or tag segments, and SHALL be listed as regular `+NAME` entries unless the directory already carries a virtual-tag segment.
 
 #### Scenario: Browsing completed tasks
 
 - **WHEN** the user lists `/+COMPLETED/home`
 - **THEN** the listing shows files for completed tasks whose project is `home` or a subproject of it
 
-#### Scenario: Dot spelling still resolves without hidden presentation
+#### Scenario: Browsing deleted tasks
 
-- **WHEN** the user mounts without `--virtual-hidden` and lists `/.+COMPLETED/home`
-- **THEN** the listing shows the same files as `/+COMPLETED/home`
+- **WHEN** the user lists `/+DELETED`
+- **THEN** the listing shows files for deleted tasks across all projects
 
-#### Scenario: Virtual tags are hidden entries
+#### Scenario: Empty status views stay listed
 
-- **WHEN** the user mounts with `--virtual-hidden` and lists `/` with a plain `ls` that hides dot files
-- **THEN** the virtual-tag directories (`.+COMPLETED`, `.+DUE`, ...) are absent from the output and present with `ls -a`
+- **WHEN** no task is completed and the user lists the root or a project directory
+- **THEN** `+COMPLETED` is still listed and entering it shows no task files
+
+### Requirement: Other uppercase plus segments are tag filters
+
+The dot-prefixed status spellings `.+COMPLETED` and `.+DELETED` SHALL fail with ENOENT. Any other uppercase `+` segment SHALL be treated as a tag filter and SHALL resolve only when a task matching the current filter carries that tag.
+
+#### Scenario: Dot spelling no longer resolves
+
+- **WHEN** the user attempts to enter `/.+COMPLETED` or `/.+DELETED`
+- **THEN** the lookup fails with ENOENT
 
 #### Scenario: Bare uppercase + segment is not a virtual tag
 
-- **WHEN** the user attempts to enter `/+BOGUS`, an uppercase name that is neither a selected virtual tag nor a tag of any task matching the current filter
+- **WHEN** the user attempts to enter `/+DUE` while no task matching the current filter carries a literal `DUE` tag
 - **THEN** the lookup fails with ENOENT
-
-#### Scenario: Non-selected virtual tag does not resolve in dot spelling
-
-- **WHEN** the user mounts with `--virtual-tags "COMPLETED"` and attempts to enter `/.+DUE`, while no task matching the current filter carries a `DUE` tag
-- **THEN** the lookup fails with ENOENT
-
-#### Scenario: Due-date tightening without filter syntax
-
-- **WHEN** the user lists `/finances/+DUE`
-- **THEN** the listing shows pending tasks in `finances.*` due within Taskwarrior's configured due window
 
 ### Requirement: Filter segments can be declared before any task matches them
 
-The system SHALL allow creating a `+name` directory with `mkdir` in a filter directory as a declaration that the tag namespace exists at that location, even when no task matching the current filter carries the tag. The system SHALL likewise allow `mkdir` of a project segment that exists nowhere in the database, so that a task can be moved into a brand-new project. Declarations persist for the life of the mount session. Creating a directory in a custom view directory SHALL fail. Creating a directory whose name is a virtual-tag segment in either spelling (`+NAME` or `.+NAME`) or any other dot-prefixed name SHALL fail.
+The system SHALL allow creating a `+name` directory with `mkdir` in a filter directory as a declaration that the tag namespace exists at that location, even when no task matching the current filter carries the tag. The system SHALL likewise allow `mkdir` of a project segment that exists nowhere in the database, so that a task can be moved into a brand-new project. Declarations persist for the life of the mount session. Creating a directory in a custom view directory SHALL fail. Creating a directory whose name is `+COMPLETED`, `+DELETED`, any other fully-uppercase `+` name, or any dot-prefixed name SHALL fail.
 
 #### Scenario: Declaring a tag that exists nowhere
 
@@ -112,8 +111,8 @@ The system SHALL allow creating a `+name` directory with `mkdir` in a filter dir
 
 #### Scenario: Virtual-tag names are rejected
 
-- **WHEN** the user runs `mkdir +DUE` or `mkdir .+DUE`
-- **THEN** the operation fails and no declaration is created
+- **WHEN** the user runs `mkdir +COMPLETED`, `mkdir +DUE`, or `mkdir .+COMPLETED`
+- **THEN** each operation fails and no declaration is created
 
 #### Scenario: Removing a declared segment that is in use
 
@@ -126,37 +125,32 @@ A directory whose accumulated filter already carries a virtual-tag segment SHALL
 
 #### Scenario: Inside a virtual-tag view no further views are listed
 
-- **WHEN** the user lists `/this/.+PENDING`
-- **THEN** the listing contains no `.+`-prefixed entries
+- **WHEN** the user lists `/+COMPLETED`
+- **THEN** the listing contains neither `+COMPLETED` nor `+DELETED`
 
-### Requirement: Virtual-tag directory removal follows the configured action
+### Requirement: Status virtual-tag directory removal follows the configured action
 
-Removing a virtual-tag directory SHALL NOT change any task. Under `delete` it SHALL fail with ENOTEMPTY while any task with a status other than deleted matches the view, and succeed once none does. Under `complete` it SHALL fail only while the view holds a task that is neither completed nor deleted, and otherwise succeed, so recursive removal converges after completion moves tasks into the completed view.
+Removing a `+COMPLETED` or `+DELETED` directory SHALL NOT change any task. Under `delete` it SHALL fail with ENOTEMPTY while any task with a status other than deleted matches the view, and succeed once none does. Under `complete` it SHALL fail only while the view holds a task that is neither completed nor deleted, and otherwise succeed, so recursive removal converges.
 
-#### Scenario: Delete action keeps the view-emptiness guard
+#### Scenario: Delete action guards a view with completed tasks
 
-- **WHEN** the user mounts with `--rm delete` and runs `rmdir .+PENDING` in `/this` while pending tasks in `this.*` exist
+- **WHEN** the user mounts with `--rm delete` and runs `rmdir +COMPLETED` in `/this` while completed tasks in `this.*` exist
 - **THEN** the operation fails with ENOTEMPTY and no task data changes
 
 #### Scenario: Delete action completes a recursive project removal
 
-- **WHEN** the user mounts with `--rm delete` and runs `rm -rf this` at the root, so each task file inside the project's virtual-tag views is unlinked before those directories are removed
+- **WHEN** the user mounts with `--rm delete` and runs `rm -rf this` at the root, so each task file inside the project's status views is unlinked before those directories are removed
 - **THEN** the view removals succeed once their tasks are deleted, the project's remaining matching tasks are deleted when `this` is removed, and no error is reported
 
 #### Scenario: Complete action converges with pre-existing completed tasks
 
 - **WHEN** the user mounts with `--rm complete` and runs `rm -rf this` while project `this` has pending tasks and already-completed tasks
-- **THEN** the pending tasks become completed, the completed tasks are unchanged, every virtual-tag directory removal succeeds, and no error is reported
+- **THEN** the pending tasks become completed, the completed tasks are unchanged, every status view directory removal succeeds, and no error is reported
 
-#### Scenario: Complete action still guards an actionable view
+#### Scenario: Complete action removes either status view
 
-- **WHEN** the user mounts with `--rm complete` and runs `rmdir .+PENDING` in `/this` while pending tasks in `this.*` exist
-- **THEN** the operation fails with ENOTEMPTY and no task data changes
-
-#### Scenario: Complete action allows removing the completed view
-
-- **WHEN** the user mounts with `--rm complete` and runs `rmdir .+COMPLETED` while completed tasks match the view
-- **THEN** the operation succeeds without changing any task
+- **WHEN** the user mounts with `--rm complete` and runs `rmdir +COMPLETED` and `rmdir +DELETED` in `/this` while completed and deleted tasks exist
+- **THEN** both operations succeed without changing any task
 
 ### Requirement: Unknown segments are not directories
 

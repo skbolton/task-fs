@@ -24,8 +24,6 @@ const uuidXattr = "user.taskwarrior.uuid"
 type FS struct {
 	dirNode
 	query          *backend.Query
-	virtualTags    []string
-	hidden         bool
 	removeAction   backend.RemoveAction
 	viewDefs       []View
 	viewDefsByName map[string]View
@@ -52,11 +50,9 @@ type View struct {
 	Filter string
 }
 
-// Config fixes the mount-time virtual-tag selection, presentation,
-// removal action, and custom view directories.
+// Config fixes the mount-time removal action and custom view
+// directories.
 type Config struct {
-	VirtualTags  []string
-	Hidden       bool
 	RemoveAction backend.RemoveAction
 	Views        []View
 	RenderView   func(context.Context, View) (string, error)
@@ -78,8 +74,6 @@ func New(query *backend.Query, cfg Config) *FS {
 	root := &FS{
 		dirNode:        dirNode{root: nil},
 		query:          query,
-		virtualTags:    cfg.VirtualTags,
-		hidden:         cfg.Hidden,
 		removeAction:   cfg.RemoveAction,
 		viewDefs:       viewDefs,
 		viewDefsByName: viewDefsByName,
@@ -130,24 +124,6 @@ func (f *FS) renderViewFilter(ctx context.Context, v View, refresh bool) (string
 	entry.at = time.Now()
 	entry.valid = true
 	return filter, nil
-}
-
-func (f *FS) isVirtualTag(name string) bool {
-	for _, vt := range f.virtualTags {
-		if vt == name {
-			return true
-		}
-	}
-	return false
-}
-
-// virtualEntryName is the listed form of a virtual tag: dot-prefixed
-// and hidden, or plus-prefixed and regular.
-func (f *FS) virtualEntryName(vt string) string {
-	if f.hidden {
-		return ".+" + vt
-	}
-	return "+" + vt
 }
 
 func (f *FS) declare(parent backend.Filter, segment string, child backend.Filter) {
@@ -313,8 +289,8 @@ func (n *dirNode) readdirEntries() ([]fuse.DirEntry, syscall.Errno) {
 	// never finish. One derived filter per path is enough for the
 	// read-only views.
 	if len(n.filter.VirtualTags) == 0 {
-		for _, vt := range n.root.virtualTags {
-			add(n.root.virtualEntryName(vt), fuse.S_IFDIR)
+		for _, vt := range backend.StatusVirtualTags() {
+			add("+"+vt, fuse.S_IFDIR)
 		}
 	}
 	tasks, err := n.listedTasks(n.filter)
@@ -451,7 +427,7 @@ func (f *FS) rmdirView(ctx context.Context, v View) syscall.Errno {
 }
 
 func (f *FS) removeTask(t backend.Task) syscall.Errno {
-	// A deleted task's file only appears in the .+DELETED view; it is a
+	// A deleted task's file only appears in the +DELETED view; it is a
 	// tombstone, and removing it again must not re-invoke delete. A
 	// completed task is likewise already done, and Taskwarrior refuses
 	// to complete it again.
@@ -488,17 +464,11 @@ func (n *dirNode) resolveChild(name string) (fs.InodeEmbedder, syscall.Errno) {
 	var child backend.Filter
 	var err error
 	switch {
-	case strings.HasPrefix(name, ".+"):
-		seg := name[2:]
-		if !n.root.isVirtualTag(seg) {
-			return nil, syscall.ENOENT
-		}
-		child, err = n.filter.WithVirtualSegment(name)
 	case strings.HasPrefix(name, "."):
 		return nil, syscall.ENOENT
 	case strings.HasPrefix(name, "+"):
 		seg := name[1:]
-		if n.root.isVirtualTag(seg) {
+		if backend.IsVirtualTag(seg) {
 			child, err = n.filter.WithVirtualSegment(name)
 			break
 		}
@@ -744,12 +714,9 @@ var _ = (fs.NodeRmdirer)((*dirNode)(nil))
 // directory together with any declarations made under it.
 func (n *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if strings.HasPrefix(name, ".") {
-		if !strings.HasPrefix(name, ".+") || !n.root.isVirtualTag(name[2:]) {
-			return syscall.ENOENT
-		}
-		return n.rmdirVirtualView(name)
+		return syscall.ENOENT
 	}
-	if strings.HasPrefix(name, "+") && n.root.isVirtualTag(name[1:]) {
+	if strings.HasPrefix(name, "+") && backend.IsVirtualTag(name[1:]) {
 		return n.rmdirVirtualView(name)
 	}
 	child, err := n.filter.WithSegment(name)
@@ -845,9 +812,6 @@ func (n *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return 0
 	}
 
-	if hasNonStatusVirtual(destFilter) {
-		return syscall.ENOTSUP
-	}
 	var args []string
 	if srcHasStatus && !dstHasStatus {
 		args = append(args, "status:pending")
@@ -868,7 +832,7 @@ func (n *dirNode) destinationFilter(dst *dirNode, newName string) (backend.Filte
 	if naming.IsMintedName(newName) {
 		return dst.filter, 0
 	}
-	if _, ok := virtualTagSegName(dst, newName); ok {
+	if _, ok := virtualTagSegName(newName); ok {
 		child, err := dst.filter.WithVirtualSegment(newName)
 		if err != nil {
 			return backend.Filter{}, syscall.EINVAL
@@ -883,13 +847,10 @@ func (n *dirNode) destinationFilter(dst *dirNode, newName string) (backend.Filte
 }
 
 // virtualTagSegName reports whether a destination name spells a
-// virtual tag selected on this mount, under either prefix.
-func virtualTagSegName(dst *dirNode, name string) (string, bool) {
-	if strings.HasPrefix(name, ".+") {
-		return name[2:], dst.root.isVirtualTag(name[2:])
-	}
+// status virtual tag.
+func virtualTagSegName(name string) (string, bool) {
 	if strings.HasPrefix(name, "+") {
-		return name[1:], dst.root.isVirtualTag(name[1:])
+		return name[1:], backend.IsVirtualTag(name[1:])
 	}
 	return "", false
 }
@@ -938,15 +899,6 @@ func statusRemoveAction(f backend.Filter) (backend.RemoveAction, syscall.Errno) 
 		return "", syscall.ENOTSUP
 	}
 	return action, 0
-}
-
-func hasNonStatusVirtual(f backend.Filter) bool {
-	for _, vt := range f.VirtualTags {
-		if _, ok := backend.StatusVirtualTag(vt); !ok {
-			return true
-		}
-	}
-	return false
 }
 
 func dirNodeOf(node fs.InodeEmbedder) (*dirNode, bool) {

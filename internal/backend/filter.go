@@ -12,6 +12,13 @@ var statusVirtualTags = map[string]string{
 	"DELETED":   "status:deleted",
 }
 
+var statusVirtualTagNames = []string{"COMPLETED", "DELETED"}
+
+// StatusVirtualTags lists the exposed virtual tags in presentation order.
+func StatusVirtualTags() []string {
+	return append([]string(nil), statusVirtualTagNames...)
+}
+
 // Filter is the accumulated taskwarrior filter of a filesystem path.
 type Filter struct {
 	Project     string
@@ -43,19 +50,14 @@ func StatusVirtualTag(name string) (string, bool) {
 	return s, ok
 }
 
-// WithVirtualSegment extends the filter by a virtual-tag segment
-// spelled +NAME or .+NAME, so both spellings resolve a selected
-// virtual tag regardless of the presentation mode.
+// WithVirtualSegment extends the filter by a +NAME status virtual tag.
 func (f Filter) WithVirtualSegment(seg string) (Filter, error) {
-	name, ok := virtualTagName(seg)
-	if !ok {
-		return f, fmt.Errorf("not a virtual-tag segment %q", seg)
+	if !strings.HasPrefix(seg, "+") {
+		return f, fmt.Errorf("not a status virtual-tag segment %q", seg)
 	}
-	if name == "" {
-		return f, fmt.Errorf("empty virtual-tag segment %q", seg)
-	}
-	if !isUppercase(name) {
-		return f, fmt.Errorf("invalid virtual-tag segment %q", seg)
+	name := seg[1:]
+	if !IsVirtualTag(name) {
+		return f, fmt.Errorf("not a status virtual-tag segment %q", seg)
 	}
 	for _, vt := range f.VirtualTags {
 		if vt == name {
@@ -67,39 +69,15 @@ func (f Filter) WithVirtualSegment(seg string) (Filter, error) {
 	return out, nil
 }
 
-func virtualTagName(seg string) (string, bool) {
-	if strings.HasPrefix(seg, ".+") {
-		return seg[2:], true
-	}
-	if strings.HasPrefix(seg, "+") {
-		return seg[1:], true
-	}
-	return "", false
-}
-
-// WithSegment returns the filter extended by one path segment: ".+X"
-// where X is fully uppercase is a virtual tag, "+x" is a tag, anything
-// else is a project segment appended to the dotted prefix.
+// WithSegment returns the filter extended by one path segment: "+x" is a
+// tag and anything else is a project segment appended to the dotted
+// prefix. Virtual tags are resolved by WithVirtualSegment.
 func (f Filter) WithSegment(seg string) (Filter, error) {
 	if seg == "" {
 		return f, fmt.Errorf("empty segment")
 	}
-	if strings.HasPrefix(seg, ".+") {
-		name := seg[2:]
-		if name == "" {
-			return f, fmt.Errorf("empty virtual-tag segment %q", seg)
-		}
-		if !isUppercase(name) {
-			return f, fmt.Errorf("invalid virtual-tag segment %q", seg)
-		}
-		for _, vt := range f.VirtualTags {
-			if vt == name {
-				return f, fmt.Errorf("segment %q already in filter", seg)
-			}
-		}
-		out := f.clone()
-		out.VirtualTags = append(out.VirtualTags, name)
-		return out, nil
+	if strings.HasPrefix(seg, ".") {
+		return f, fmt.Errorf("dot-prefixed segment %q is reserved", seg)
 	}
 	if strings.HasPrefix(seg, "+") {
 		name := seg[1:]
@@ -114,9 +92,6 @@ func (f Filter) WithSegment(seg string) (Filter, error) {
 		out := f.clone()
 		out.Tags = append(out.Tags, name)
 		return out, nil
-	}
-	if strings.HasPrefix(seg, ".") {
-		return f, fmt.Errorf("dot-prefixed segment %q is reserved", seg)
 	}
 	if f.Project != "" {
 		if seg == lastSegment(f.Project) {
@@ -193,8 +168,4 @@ func lastSegment(project string) string {
 		return project[i+1:]
 	}
 	return project
-}
-
-func isUppercase(s string) bool {
-	return s == strings.ToUpper(s)
 }
