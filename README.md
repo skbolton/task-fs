@@ -144,7 +144,7 @@ cat > '@THIS MONTH/_view' <<'EOF'
 status:pending sched.after:som sched.before:eom
 sched:{{cycle this month}}
 EOF
-mv home/Report.a1b2c3d4.md '@THIS MONTH'
+mv home/Report.a1b2c3d4.txt '@THIS MONTH'
 ```
 
 A mount flag selects what removing a task does:
@@ -290,7 +290,7 @@ Dot-prefixed names are reserved for the filesystem: `mkdir` rejects them.
 Each task matching a view appears as one file:
 
 ```
-Pick up Milk.96b7b9b1.md
+Pick up Milk.96b7b9b1.txt
 ```
 
 The suffix is the first 8 hex characters of the task's UUID. Names are
@@ -300,11 +300,11 @@ read-only in this version — the file name is the preview. To script against
 a task, resolve its full UUID from the extended attribute:
 
 ```sh
-getfattr -n user.taskwarrior.uuid --only-values "Pick up Milk.96b7b9b1.md"
+getfattr -n user.taskwarrior.uuid --only-values "Pick up Milk.96b7b9b1.txt"
 ```
 
-Writes to task files are rejected; a future note system will map file edits
-to task annotations.
+Writes to task files are rejected; task content is owned by Taskwarrior, and
+note editing is left to whichever client or file manager you choose.
 
 ## Gestures
 

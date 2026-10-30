@@ -182,7 +182,7 @@ func TestStoreValidateName(t *testing.T) {
 		{"a/b", false},
 		{"bad\tname", false},
 		{"bad\nname", false},
-		{"Report.a1b2c3d4.md", false},
+		{"Report.a1b2c3d4.txt", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,7 +266,7 @@ func TestStoreListIgnoresNonViews(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Report.a1b2c3d4.md"), []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "Report.a1b2c3d4.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write junk: %v", err)
 	}
 	names, err := store.List()
@@ -280,7 +280,7 @@ func TestStoreListIgnoresNonViews(t *testing.T) {
 
 func TestStoreImportViews(t *testing.T) {
 	mount := t.TempDir()
-	for _, dir := range []string{"@Due", "@Empty", "@Blank", "@Sched", "@Legacy", "@", "@Report.a1b2c3d4.md", "plain"} {
+	for _, dir := range []string{"@Due", "@Empty", "@Blank", "@Sched", "@Legacy", "@", "@Report.a1b2c3d4.txt", "plain"} {
 		if err := os.Mkdir(filepath.Join(mount, dir), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}

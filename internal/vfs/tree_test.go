@@ -339,7 +339,7 @@ func TestCreateGestures(t *testing.T) {
 	if !hasArg(addCmd, "Pick up Milk") || !hasArg(addCmd, "project:home") {
 		t.Errorf("add command = %v", addCmd)
 	}
-	if _, errno := homeNode.createChild("X.a1b2c3d4.md"); errno != syscall.EPERM {
+	if _, errno := homeNode.createChild("X.a1b2c3d4.txt"); errno != syscall.EPERM {
 		t.Errorf("create minted name: errno = %v, want EPERM", errno)
 	}
 }
@@ -2292,7 +2292,7 @@ func TestRuntimeViewNameValidation(t *testing.T) {
 		"@",
 		"@.",
 		"@..",
-		"@Report.a1b2c3d4.md",
+		"@Report.a1b2c3d4.txt",
 		"@" + strings.Repeat("a", 255),
 		"@bad\tname",
 	} {

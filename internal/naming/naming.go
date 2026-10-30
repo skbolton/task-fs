@@ -8,8 +8,8 @@ import (
 
 const (
 	maxNameLen    = 255
-	suffixFmt     = "%s.%s.md"
-	SuffixLenBase = 13 // "." + 8 hex + ".md"
+	suffixFmt     = "%s.%s.txt"
+	SuffixLenBase = 13 // "." + 8 hex + ".txt"
 )
 
 var illegalChars = map[rune]bool{
@@ -34,7 +34,7 @@ func ShortUUID(uuid string) string {
 }
 
 // FileName derives the deterministic task file name for a description
-// and full UUID: sanitized description, short-UUID suffix, .md
+// and full UUID: sanitized description, short-UUID suffix, .txt
 // extension, truncated to 255 bytes with suffix and extension retained.
 func FileName(description, uuid string) string {
 	short := ShortUUID(uuid)
@@ -82,12 +82,12 @@ func truncateBytes(s string, max int) string {
 const hexDigits = "0123456789abcdef"
 
 // IsMintedName reports whether a file name matches the pattern the
-// filesystem mints for task files: <anything>.<8-hex>.md.
+// filesystem mints for task files: <anything>.<8-hex>.txt.
 func IsMintedName(name string) bool {
-	if !strings.HasSuffix(name, ".md") {
+	if !strings.HasSuffix(name, ".txt") {
 		return false
 	}
-	body := name[:len(name)-3]
+	body := strings.TrimSuffix(name, ".txt")
 	dot := strings.LastIndexByte(body, '.')
 	if dot < 0 || len(body)-dot-1 != 8 {
 		return false
