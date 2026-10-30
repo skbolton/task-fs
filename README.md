@@ -169,7 +169,8 @@ terminal are visible immediately.
 ## Home Manager
 
 Add this repository as a flake input, import the module, and enable the
-service:
+service. Each entry under `services.task-fs.mounts` is a named mount and gets
+its own systemd user service:
 
 ```nix
 {
@@ -179,61 +180,69 @@ service:
 
   services.task-fs = {
     enable = true;
-    automount = {
-      enable = true;
-      path = "~/some/path";
+    mounts = {
+      work = {
+        path = "~/work-tasks";
+      };
+      personal = {
+        path = "~/personal-tasks";
+        taskData = "~/task-data/personal";
+      };
     };
   };
 }
 ```
 
 `services.task-fs.package` overrides the mounted binary; it defaults to the
-package built by this flake. The automount runs as a systemd user service:
-it creates the mountpoint if needed, mounts on session start, and unmounts
-when the session ends. Linux only.
+package built by this flake. Each mount runs as its own systemd user service
+named `task-fs-<name>.service`: it creates the mountpoint if needed, mounts on
+session start, and unmounts when the session ends. Linux only.
 
-The mount resolves its Taskwarrior database from the systemd user manager's
-environment, not your interactive shell. For an alternate database, set
-`TASKDATA` in the session environment:
+By default a mount uses the Taskwarrior database from the systemd user
+manager's environment, not your interactive shell. Set `taskData` to give one
+mount its own database. When set, the service runs with `TASKDATA` pointing at
+that directory; a leading `~` expands to your home directory. When `taskData`
+is unset, the mount inherits the session environment, so a session-wide
+database can still be set with:
 
 ```nix
 systemd.user.sessionEnvironment.TASKDATA = "/home/me/other-tasks";
 ```
 
-The automount accepts mount flags through
-`services.task-fs.automount.mountFlags`, a list of strings where each item is
-one command-line token:
+Mount flags and extra packages are per mount, and each `mountFlags` item is one
+command-line token:
 
 ```nix
-services.task-fs.automount.mountFlags = [
+services.task-fs.mounts.work.mountFlags = [
   "--rm"
   "delete"
 ];
+
+services.task-fs.mounts.work.extraPackages = [ pkgs.delta.cycle ];
 ```
 
-Commands in `{{ ... }}` blocks run with the automount service `PATH`. Add
-packages whose executables you invoke by name:
-
-```nix
-services.task-fs.automount.extraPackages = [ pkgs.delta.cycle ];
-```
-
-That lets a `_view` use `{{cycle last week --end}}` without an absolute Nix
+Commands in `{{ ... }}` blocks run with that mount service's `PATH`. The
+example lets a `_view` use `{{cycle last week --end}}` without an absolute Nix
 store path. Commands outside the configured `PATH` still need an absolute path
 or a wrapper script.
 
 Runtime views are created through the mounted tree rather than in the mount
-flags. Their definitions live under the automount user's state directory
+flags. Their definitions live under the service user's state directory
 (`$XDG_STATE_HOME/task-fs/views`, or `$HOME/.local/state/task-fs/views`), so
 they survive service restarts and are shared with views created from an
 interactive mount.
 
-The automount service provides a POSIX shell and coreutils, so `{{ ... }}`
-blocks in a `_view` can use commands such as `date`. Commands outside that
-baseline must use an absolute Nix store path or an executable wrapper script,
-because the service does not inherit your interactive shell's `PATH`. The
-mount command's shell environment does include the session's Taskwarrior
-configuration and `TASKDATA`.
+Each mount service provides a POSIX shell and coreutils, so `{{ ... }}` blocks
+in a `_view` can use commands such as `date`. Commands outside that baseline
+must use an absolute Nix store path or an executable wrapper script, because
+the service does not inherit your interactive shell's `PATH`. The mount
+command's shell environment includes the session's Taskwarrior configuration
+and, when set, the mount's `TASKDATA`.
+
+**Breaking change:** `services.task-fs.automount` is gone. Move its `path`,
+`mountFlags`, and `extraPackages` into one entry under
+`services.task-fs.mounts.<name>`; drop the old `automount.enable` field and keep
+`services.task-fs.enable` as the global switch.
 
 ## The path grammar
 
