@@ -55,17 +55,19 @@ in
           `+COMPLETED` and `+DELETED` status views.
 
           Custom views are created through the mounted tree with
-          `mkdir @NAME` and a filter written to `@NAME/_filter`; they are not
-          mount flags. Their definitions persist under the service user's
-          `$XDG_STATE_HOME/task-fs/views`, falling back to
-          `$HOME/.local/state/task-fs/views`, so they survive service
-          restarts. `@NAME` directories already present under the automount
-          path are imported when the service starts.
+          `mkdir @NAME` and a definition written to `@NAME/_view`; they are
+          not mount flags. The first line is the filter. An optional second
+          line holds the taskwarrior modify arguments applied when a task is
+          moved into the view; without it the view is read-only. Definitions
+          persist under the service user's `$XDG_STATE_HOME/task-fs/views`,
+          falling back to `$HOME/.local/state/task-fs/views`, so they survive
+          service restarts. `@NAME` directories already present under the
+          automount path are imported when the service starts.
 
-          `{{ ... }}` blocks in a `_filter` run in the automount service
-          environment, which provides a POSIX shell and coreutils. Commands
-          outside that baseline must be referenced by absolute path or
-          through a wrapper script.
+          `{{ ... }}` blocks in either line of `_view` run in the automount
+          service environment, which provides a POSIX shell and coreutils.
+          Commands outside that baseline must be referenced by absolute path
+          or through a wrapper script.
         '';
       };
 
@@ -76,7 +78,7 @@ in
         description = ''
           Packages to add to the automount service `PATH`, so commands in a
           `{{ ... }}` block can be invoked by name. For example, adding
-          `pkgs.delta.cycle` lets a `_filter` use `{{cycle last week --end}}`.
+          `pkgs.delta.cycle` lets a `_view` use `{{cycle last week --end}}`.
           The default `PATH` still provides taskwarrior3, fuse3, and coreutils.
         '';
       };

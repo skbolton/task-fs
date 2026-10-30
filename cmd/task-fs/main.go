@@ -47,12 +47,12 @@ func run(args []string) error {
 		fmt.Fprintf(os.Stderr, "task-fs: import views from %s: %v\n", mountpoint, err)
 	}
 	shell := view.NewShellRunner(os.Environ(), view.DefaultTimeout)
-	renderFilter := newFilterRenderer(shell)
+	renderTemplate := newTemplateRenderer(shell)
 
 	root := vfs.New(query, vfs.Config{
-		RemoveAction: action,
-		ViewStore:    store,
-		RenderFilter: renderFilter,
+		RemoveAction:   action,
+		ViewStore:      store,
+		RenderTemplate: renderTemplate,
 	})
 	server, err := fs.Mount(mountpoint, root, &fs.Options{})
 	if err != nil {
@@ -69,7 +69,7 @@ func openViewStore() (*view.Store, error) {
 	return view.OpenStore()
 }
 
-func newFilterRenderer(runner view.Runner) func(context.Context, string) (string, error) {
+func newTemplateRenderer(runner view.Runner) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, raw string) (string, error) {
 		template, err := view.Parse(strings.TrimSpace(raw))
 		if err != nil {

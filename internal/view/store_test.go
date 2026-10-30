@@ -123,6 +123,34 @@ func TestStoreLifecyclePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestStoreReopenPreservesSingleAndTwoLineDefinitions(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	definitions := map[string]string{
+		"Single": "status:pending +next",
+		"Double": "status:pending sched.after:sonw\nsched:2026-10-26",
+	}
+	for name, definition := range definitions {
+		if err := store.Put(name, definition); err != nil {
+			t.Fatalf("Put %s: %v", name, err)
+		}
+	}
+
+	reopened, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore reopen: %v", err)
+	}
+	for name, want := range definitions {
+		got, ok, err := reopened.Get(name)
+		if err != nil || !ok || got != want {
+			t.Errorf("Get %s after reopen = %q, %v, %v; want %q", name, got, ok, err, want)
+		}
+	}
+}
+
 func TestStoreCreateReportsExistingName(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -169,7 +197,7 @@ func TestStoreValidateName(t *testing.T) {
 	}
 }
 
-func TestStoreFilterTextRoundTrips(t *testing.T) {
+func TestStoreDefinitionTextRoundTrips(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -252,16 +280,23 @@ func TestStoreListIgnoresNonViews(t *testing.T) {
 
 func TestStoreImportViews(t *testing.T) {
 	mount := t.TempDir()
-	for _, dir := range []string{"@Due", "@Empty", "@Blank", "@", "@Report.a1b2c3d4.md", "plain"} {
+	for _, dir := range []string{"@Due", "@Empty", "@Blank", "@Sched", "@Legacy", "@", "@Report.a1b2c3d4.md", "plain"} {
 		if err := os.Mkdir(filepath.Join(mount, dir), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(mount, "@Due", FilterFileName), []byte("status:pending +next"), 0o600); err != nil {
-		t.Fatalf("write filter: %v", err)
+	if err := os.WriteFile(filepath.Join(mount, "@Due", ViewFileName), []byte("status:pending +next"), 0o600); err != nil {
+		t.Fatalf("write definition: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(mount, "@Blank", FilterFileName), nil, 0o600); err != nil {
-		t.Fatalf("write empty filter: %v", err)
+	if err := os.WriteFile(filepath.Join(mount, "@Blank", ViewFileName), nil, 0o600); err != nil {
+		t.Fatalf("write empty definition: %v", err)
+	}
+	twoLine := "status:pending sched.after:sonw\nsched:2026-10-26"
+	if err := os.WriteFile(filepath.Join(mount, "@Sched", ViewFileName), []byte(twoLine), 0o600); err != nil {
+		t.Fatalf("write two-line definition: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mount, "@Legacy", "_filter"), []byte("status:pending"), 0o600); err != nil {
+		t.Fatalf("write legacy filter: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(mount, "@file"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write @file: %v", err)
@@ -278,20 +313,26 @@ func TestStoreImportViews(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if got := strings.Join(names, ","); got != "Blank,Due,Empty" {
-		t.Errorf("List after import = %q, want Blank,Due,Empty", got)
+	if got := strings.Join(names, ","); got != "Blank,Due,Empty,Legacy,Sched" {
+		t.Errorf("List after import = %q, want Blank,Due,Empty,Legacy,Sched", got)
 	}
-	if filter, ok, err := store.Get("Due"); err != nil || !ok || filter != "status:pending +next" {
-		t.Errorf("imported Due = %q, %v, %v", filter, ok, err)
+	if definition, ok, err := store.Get("Due"); err != nil || !ok || definition != "status:pending +next" {
+		t.Errorf("imported Due = %q, %v, %v", definition, ok, err)
 	}
-	if filter, ok, err := store.Get("Empty"); err != nil || !ok || filter != "" {
-		t.Errorf("imported Empty = %q, %v, %v; want empty no-op", filter, ok, err)
+	if definition, ok, err := store.Get("Sched"); err != nil || !ok || definition != twoLine {
+		t.Errorf("imported Sched = %q, %v, %v; want %q", definition, ok, err, twoLine)
 	}
-	if has, err := store.HasFilter("Empty"); err != nil || has {
-		t.Errorf("imported Empty HasFilter = %v, %v; want false", has, err)
+	if definition, ok, err := store.Get("Empty"); err != nil || !ok || definition != "" {
+		t.Errorf("imported Empty = %q, %v, %v; want empty no-op", definition, ok, err)
 	}
-	if has, err := store.HasFilter("Blank"); err != nil || !has {
-		t.Errorf("imported Blank HasFilter = %v, %v; want true", has, err)
+	if has, err := store.HasView("Empty"); err != nil || has {
+		t.Errorf("imported Empty HasView = %v, %v; want false", has, err)
+	}
+	if has, err := store.HasView("Blank"); err != nil || !has {
+		t.Errorf("imported Blank HasView = %v, %v; want true", has, err)
+	}
+	if has, err := store.HasView("Legacy"); err != nil || has {
+		t.Errorf("legacy _filter HasView = %v, %v; want false", has, err)
 	}
 }
 
@@ -301,7 +342,7 @@ func TestStoreImportViewsUsesNewestDefinition(t *testing.T) {
 	if err := os.Mkdir(dueDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	filterPath := filepath.Join(dueDir, FilterFileName)
+	filterPath := filepath.Join(dueDir, ViewFileName)
 	if err := os.WriteFile(filterPath, []byte("project:home"), 0o600); err != nil {
 		t.Fatalf("write filter: %v", err)
 	}
@@ -365,14 +406,14 @@ func TestStoreEmptyFilterIsPresent(t *testing.T) {
 	if err := store.Create("Due"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if has, err := store.HasFilter("Due"); err != nil || has {
-		t.Fatalf("new view HasFilter = %v, %v; want false", has, err)
+	if has, err := store.HasView("Due"); err != nil || has {
+		t.Fatalf("new view HasView = %v, %v; want false", has, err)
 	}
 	if err := store.Put("Due", ""); err != nil {
 		t.Fatalf("Put empty: %v", err)
 	}
-	if has, err := store.HasFilter("Due"); err != nil || !has {
-		t.Fatalf("empty filter HasFilter = %v, %v; want true", has, err)
+	if has, err := store.HasView("Due"); err != nil || !has {
+		t.Fatalf("empty filter HasView = %v, %v; want true", has, err)
 	}
 	if filter, ok, err := store.Get("Due"); err != nil || !ok || filter != "" {
 		t.Fatalf("empty filter Get = %q, %v, %v", filter, ok, err)
@@ -382,14 +423,14 @@ func TestStoreEmptyFilterIsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore reopen: %v", err)
 	}
-	if has, err := reopened.HasFilter("Due"); err != nil || !has {
-		t.Errorf("empty filter after reopen HasFilter = %v, %v; want true", has, err)
+	if has, err := reopened.HasView("Due"); err != nil || !has {
+		t.Errorf("empty filter after reopen HasView = %v, %v; want true", has, err)
 	}
-	if err := reopened.DeleteFilter("Due"); err != nil {
-		t.Fatalf("DeleteFilter: %v", err)
+	if err := reopened.DeleteViewFile("Due"); err != nil {
+		t.Fatalf("DeleteViewFile: %v", err)
 	}
-	if has, err := reopened.HasFilter("Due"); err != nil || has {
-		t.Errorf("deleted filter HasFilter = %v, %v; want false", has, err)
+	if has, err := reopened.HasView("Due"); err != nil || has {
+		t.Errorf("deleted filter HasView = %v, %v; want false", has, err)
 	}
 	if filter, ok, err := reopened.Get("Due"); err != nil || !ok || filter != "" {
 		t.Errorf("deleted filter Get = %q, %v, %v; want empty view", filter, ok, err)
@@ -410,15 +451,15 @@ func TestStoreMigrationPreservesTimeForImport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if has, err := store.HasFilter("Due"); err != nil || has {
-		t.Fatalf("legacy HasFilter = %v, %v; want false", has, err)
+	if has, err := store.HasView("Due"); err != nil || has {
+		t.Fatalf("legacy HasView = %v, %v; want false", has, err)
 	}
 
 	mount := t.TempDir()
 	if err := os.Mkdir(filepath.Join(mount, "@Due"), 0o755); err != nil {
 		t.Fatalf("mkdir mount view: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(mount, "@Due", FilterFileName), []byte("status:pending"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(mount, "@Due", ViewFileName), []byte("status:pending"), 0o600); err != nil {
 		t.Fatalf("write mount filter: %v", err)
 	}
 	if err := store.ImportViews(mount); err != nil {
@@ -441,11 +482,11 @@ func TestStoreMigratesLegacyEmptyAsNoFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if has, err := store.HasFilter("Due"); err != nil || has {
-		t.Errorf("legacy empty HasFilter = %v, %v; want false", has, err)
+	if has, err := store.HasView("Due"); err != nil || has {
+		t.Errorf("legacy empty HasView = %v, %v; want false", has, err)
 	}
-	if has, err := store.HasFilter("Other"); err != nil || !has {
-		t.Errorf("legacy populated HasFilter = %v, %v; want true", has, err)
+	if has, err := store.HasView("Other"); err != nil || !has {
+		t.Errorf("legacy populated HasView = %v, %v; want true", has, err)
 	}
 	if err := store.Put("Fresh", ""); err != nil {
 		t.Fatalf("Put empty after migration: %v", err)
@@ -454,7 +495,7 @@ func TestStoreMigratesLegacyEmptyAsNoFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore reopen: %v", err)
 	}
-	if has, err := reopened.HasFilter("Fresh"); err != nil || !has {
-		t.Errorf("post-migration empty filter HasFilter = %v, %v; want true", has, err)
+	if has, err := reopened.HasView("Fresh"); err != nil || !has {
+		t.Errorf("post-migration empty filter HasView = %v, %v; want true", has, err)
 	}
 }

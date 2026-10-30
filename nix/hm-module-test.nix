@@ -244,7 +244,7 @@ let
     {
       cond =
         lib.hasInfix "XDG_STATE_HOME" default.options.services.task-fs.automount.mountFlags.description
-        && lib.hasInfix "_filter" default.options.services.task-fs.automount.mountFlags.description;
+        && lib.hasInfix "_view" default.options.services.task-fs.automount.mountFlags.description;
       msg = "The mountFlags description does not document runtime views and their state directory";
     }
     {

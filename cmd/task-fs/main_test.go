@@ -85,7 +85,7 @@ func (r *fakeViewRunner) Run(_ context.Context, command string) ([]byte, error) 
 
 func TestNewQueryRendererRendersBlocks(t *testing.T) {
 	runner := &fakeViewRunner{out: "2026-11-01\n"}
-	render := newFilterRenderer(runner)
+	render := newTemplateRenderer(runner)
 	got, err := render(context.Background(), "status:pending due.before:{{ date +%F }}")
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -100,7 +100,7 @@ func TestNewQueryRendererRendersBlocks(t *testing.T) {
 
 func TestNewQueryRendererReportsTemplateErrors(t *testing.T) {
 	runner := &fakeViewRunner{out: "2026-11-01"}
-	render := newFilterRenderer(runner)
+	render := newTemplateRenderer(runner)
 	if _, err := render(context.Background(), "due.before:{{ }}"); err == nil || !strings.Contains(err.Error(), "empty command block") {
 		t.Errorf("empty block error = %v", err)
 	}

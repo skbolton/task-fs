@@ -1135,6 +1135,7 @@ func newSweepFSWithAction(t *testing.T, action backend.RemoveAction, tasks ...ba
 type testView struct {
 	Name   string
 	Filter string
+	Modify string
 }
 
 func newViewStore(t *testing.T) *view.Store {
@@ -1150,19 +1151,41 @@ func newSweepFSWithViews(t *testing.T, action backend.RemoveAction, views []test
 	t.Helper()
 	store := newViewStore(t)
 	for _, v := range views {
-		if v.Filter == "" {
+		definition := v.Filter
+		if v.Modify != "" {
+			definition += "\n" + v.Modify
+		}
+		if definition == "" {
 			if err := store.Create(v.Name); err != nil {
 				t.Fatalf("seed view %q: %v", v.Name, err)
 			}
 			continue
 		}
-		if err := store.Put(v.Name, v.Filter); err != nil {
+		if err := store.Put(v.Name, definition); err != nil {
 			t.Fatalf("seed view %q: %v", v.Name, err)
 		}
 	}
 	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
 	runner := &fakeRunner{fn: db.serve}
 	fs := New(backend.NewQuery(runner), Config{RemoveAction: action, ViewStore: store})
+	return fs, runner, db
+}
+
+func newSweepFSWithDefinitions(t *testing.T, action backend.RemoveAction, definitions map[string]string, render func(context.Context, string) (string, error), tasks ...backend.Task) (*FS, *fakeRunner, *sweepDB) {
+	t.Helper()
+	store := newViewStore(t)
+	for name, definition := range definitions {
+		if err := store.Put(name, definition); err != nil {
+			t.Fatalf("seed view %q: %v", name, err)
+		}
+	}
+	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
+	runner := &fakeRunner{fn: db.serve}
+	fs := New(backend.NewQuery(runner), Config{
+		RemoveAction:   action,
+		ViewStore:      store,
+		RenderTemplate: render,
+	})
 	return fs, runner, db
 }
 
@@ -1219,8 +1242,47 @@ func (db *sweepDB) serve(args []string) ([]byte, error) {
 			}
 		}
 		return nil, nil
+	case hasArg(args, "modify"):
+		for i, a := range args {
+			if a != "modify" {
+				continue
+			}
+			db.modify(args[i-1], args[i+1:])
+			break
+		}
+		return nil, nil
 	}
 	return nil, nil
+}
+
+func (db *sweepDB) modify(uuid string, args []string) {
+	for i := range db.tasks {
+		if db.tasks[i].UUID != uuid {
+			continue
+		}
+		for _, arg := range args {
+			switch {
+			case strings.HasPrefix(arg, "project:"):
+				db.tasks[i].Project = strings.TrimPrefix(arg, "project:")
+			case strings.HasPrefix(arg, "description:"):
+				db.tasks[i].Description = strings.TrimPrefix(arg, "description:")
+			case strings.HasPrefix(arg, "+"):
+				tag := strings.TrimPrefix(arg, "+")
+				if !contains(db.tasks[i].Tags, tag) {
+					db.tasks[i].Tags = append(db.tasks[i].Tags, tag)
+				}
+			case strings.HasPrefix(arg, "-"):
+				tag := strings.TrimPrefix(arg, "-")
+				var tags []string
+				for _, existing := range db.tasks[i].Tags {
+					if existing != tag {
+						tags = append(tags, existing)
+					}
+				}
+				db.tasks[i].Tags = tags
+			}
+		}
+	}
 }
 
 // match emulates taskwarrior's filter semantics for the argument shapes
@@ -1329,6 +1391,18 @@ func rmdirCompletedUUIDs(runner *fakeRunner) []string {
 		}
 	}
 	return out
+}
+
+func lastModifyArgs(runner *fakeRunner) []string {
+	var got []string
+	for _, cmd := range runner.log {
+		for i, arg := range cmd {
+			if arg == "modify" {
+				got = cmd[i+1:]
+			}
+		}
+	}
+	return got
 }
 
 func mutationCount(runner *fakeRunner) int {
@@ -1788,8 +1862,8 @@ func TestRootListsConfiguredViews(t *testing.T) {
 		t.Errorf("empty custom view missing from root: %v", names)
 	}
 	emptyNode := resolveViewNode(t, emptyFS, "@Empty")
-	if names := readdirViewOf(t, emptyNode); len(names) != 1 || names[0] != filterFileName {
-		t.Errorf("empty custom view = %v, want only %q", names, filterFileName)
+	if names := readdirViewOf(t, emptyNode); len(names) != 1 || names[0] != viewFileName {
+		t.Errorf("empty custom view = %v, want only %q", names, viewFileName)
 	}
 }
 
@@ -1811,9 +1885,9 @@ func newDynamicViewFS(t *testing.T, action backend.RemoveAction, render func(con
 	db := &sweepDB{tasks: tasks, deleted: map[string]bool{}, completed: map[string]bool{}}
 	runner := &fakeRunner{fn: db.serve}
 	f := New(backend.NewQuery(runner), Config{
-		RemoveAction: action,
-		ViewStore:    store,
-		RenderFilter: render,
+		RemoveAction:   action,
+		ViewStore:      store,
+		RenderTemplate: render,
 	})
 	return f, runner, db
 }
@@ -2160,11 +2234,11 @@ func TestRecursiveCustomViewRemovalConverges(t *testing.T) {
 			if names := readdirViewOf(t, vn); !contains(names, name) {
 				t.Fatalf("initial view listing missing task: %v", names)
 			}
-			if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
-				t.Fatalf("unlink _filter: %v", errno)
+			if errno := vn.Unlink(context.Background(), viewFileName); errno != 0 {
+				t.Fatalf("unlink _view: %v", errno)
 			}
 			if errno := vn.Unlink(context.Background(), name); errno != 0 {
-				t.Fatalf("unlink task after clearing _filter: %v", errno)
+				t.Fatalf("unlink task after clearing _view: %v", errno)
 			}
 			if errno := fs.Rmdir(context.Background(), "@Due"); errno != 0 {
 				t.Fatalf("rmdir custom view: %v", errno)
@@ -2194,8 +2268,8 @@ func TestRootMkdirCreatesEmptyView(t *testing.T) {
 	if names := readdirViewOf(t, vn); len(names) != 0 {
 		t.Errorf("new view listing = %v, want no entries", names)
 	}
-	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != syscall.ENOENT {
-		t.Errorf("lookup _filter before creation: errno = %v, want ENOENT", errno)
+	if _, errno := vn.resolveChild(context.Background(), viewFileName, false); errno != syscall.ENOENT {
+		t.Errorf("lookup _view before creation: errno = %v, want ENOENT", errno)
 	}
 	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "" {
 		t.Errorf("new view definition = %q, %v, %v; want empty", query, ok, err)
@@ -2231,32 +2305,32 @@ func TestRuntimeViewNameValidation(t *testing.T) {
 	}
 }
 
-func TestViewFilterFileReadWrite(t *testing.T) {
+func TestViewDefinitionFileReadWrite(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete,
 		[]testView{{Name: "Due", Filter: ""}},
 		task(uuidA, "Do taxes", "home"),
 	)
 	vn := resolveViewNode(t, fs, "@Due")
-	qn, handle := createFilterNode(t, vn, syscall.O_WRONLY|syscall.O_TRUNC)
+	qn, handle := createViewFileNode(t, vn, syscall.O_WRONLY|syscall.O_TRUNC)
 
-	if size := filterSize(t, qn); size != 0 {
+	if size := definitionSize(t, qn); size != 0 {
 		t.Errorf("new filter size = %d, want 0", size)
 	}
-	if got := readFilter(t, qn); got != "" {
+	if got := readViewFile(t, qn); got != "" {
 		t.Errorf("new filter = %q, want empty", got)
 	}
 	if errno := qn.Release(context.Background(), handle); errno != 0 {
 		t.Fatalf("release empty filter: %v", errno)
 	}
 
-	writeFilter(t, qn, "status:pending")
-	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != 0 {
-		t.Errorf("lookup _filter after write: %v", errno)
+	writeViewFile(t, qn, "status:pending")
+	if _, errno := vn.resolveChild(context.Background(), viewFileName, false); errno != 0 {
+		t.Errorf("lookup _view after write: %v", errno)
 	}
-	if got := readFilter(t, qn); got != "status:pending" {
+	if got := readViewFile(t, qn); got != "status:pending" {
 		t.Errorf("read after write = %q", got)
 	}
-	if size := filterSize(t, qn); size != len("status:pending") {
+	if size := definitionSize(t, qn); size != len("status:pending") {
 		t.Errorf("query size = %d, want %d", size, len("status:pending"))
 	}
 	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "status:pending" {
@@ -2277,7 +2351,7 @@ func TestNodeAttributesReportMountOwner(t *testing.T) {
 	if errno := vn.Getattr(context.Background(), nil, &dirOut); errno != 0 {
 		t.Fatalf("view Getattr: %v", errno)
 	}
-	qn := resolveFilterNode(t, vn)
+	qn := resolveViewFileNode(t, vn)
 	var fileOut fuse.AttrOut
 	if errno := qn.Getattr(context.Background(), nil, &fileOut); errno != 0 {
 		t.Fatalf("filter Getattr: %v", errno)
@@ -2292,9 +2366,9 @@ func TestNodeAttributesReportMountOwner(t *testing.T) {
 	}
 }
 
-func TestViewFilterMultiChunkWrite(t *testing.T) {
+func TestViewDefinitionMultiChunkWrite(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
-	qn, fh := createFilterNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
+	qn, fh := createViewFileNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
 	if _, errno := qn.Write(context.Background(), fh, []byte("status:"), 0); errno != 0 {
 		t.Fatalf("Write first chunk: %v", errno)
 	}
@@ -2304,46 +2378,46 @@ func TestViewFilterMultiChunkWrite(t *testing.T) {
 	if errno := qn.Flush(context.Background(), fh); errno != 0 {
 		t.Fatalf("Flush: %v", errno)
 	}
-	if got := readFilter(t, qn); got != "status:pending" {
+	if got := readViewFile(t, qn); got != "status:pending" {
 		t.Errorf("multi-chunk filter = %q", got)
 	}
 }
 
-func TestViewFilterTruncateAndTouch(t *testing.T) {
+func TestViewDefinitionTruncateAndTouch(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:pending"}})
 	vn := resolveViewNode(t, fs, "@Due")
-	qn := resolveFilterNode(t, vn)
+	qn := resolveViewFileNode(t, vn)
 
-	writeFilter(t, qn, "")
-	if got := readFilter(t, qn); got != "" {
+	writeViewFile(t, qn, "")
+	if got := readViewFile(t, qn); got != "" {
 		t.Errorf("truncated filter = %q, want empty", got)
 	}
-	if names := readdirViewOf(t, vn); !contains(names, filterFileName) {
+	if names := readdirViewOf(t, vn); !contains(names, viewFileName) {
 		t.Errorf("empty filter is not listed: %v", names)
 	}
 
-	if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
-		t.Fatalf("unlink _filter: %v", errno)
+	if errno := vn.Unlink(context.Background(), viewFileName); errno != 0 {
+		t.Fatalf("unlink _view: %v", errno)
 	}
 	if names := readdirViewOf(t, vn); len(names) != 0 {
-		t.Errorf("view after _filter removal = %v, want no entries", names)
+		t.Errorf("view after _view removal = %v, want no entries", names)
 	}
 
-	child, handle, _, errno := vn.createFilter(context.Background(), filterFileName, syscall.O_WRONLY)
+	child, handle, _, errno := vn.createViewFile(context.Background(), viewFileName, syscall.O_WRONLY)
 	if errno != 0 {
-		t.Fatalf("create _filter: %v", errno)
+		t.Fatalf("create _view: %v", errno)
 	}
-	if errno := child.(*filterFileNode).Release(context.Background(), handle); errno != 0 {
-		t.Fatalf("release recreated _filter: %v", errno)
+	if errno := child.(*viewFileNode).Release(context.Background(), handle); errno != 0 {
+		t.Fatalf("release recreated _view: %v", errno)
 	}
-	if names := readdirViewOf(t, vn); !contains(names, filterFileName) {
-		t.Errorf("touched _filter is not listed: %v", names)
+	if names := readdirViewOf(t, vn); !contains(names, viewFileName) {
+		t.Errorf("touched _view is not listed: %v", names)
 	}
 }
 
-func TestViewFilterSetattrTruncatesOpenHandle(t *testing.T) {
+func TestViewDefinitionSetattrTruncatesOpenHandle(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: "status:pending +next"}})
-	qn := resolveFilterNode(t, resolveViewNode(t, fs, "@Due"))
+	qn := resolveViewFileNode(t, resolveViewNode(t, fs, "@Due"))
 	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY)
 	if errno != 0 {
 		t.Fatalf("Open: %v", errno)
@@ -2364,9 +2438,9 @@ func TestViewFilterSetattrTruncatesOpenHandle(t *testing.T) {
 	}
 }
 
-func TestViewFilterFsyncPersists(t *testing.T) {
+func TestViewDefinitionFsyncPersists(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
-	qn, handle := createFilterNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
+	qn, handle := createViewFileNode(t, resolveViewNode(t, fs, "@Due"), syscall.O_WRONLY|syscall.O_TRUNC)
 	if _, errno := qn.Write(context.Background(), handle, []byte("status:pending"), 0); errno != 0 {
 		t.Fatalf("Write: %v", errno)
 	}
@@ -2378,7 +2452,7 @@ func TestViewFilterFsyncPersists(t *testing.T) {
 	}
 }
 
-func TestViewFilterFlushFailureKeepsPrevious(t *testing.T) {
+func TestViewDefinitionFlushFailureKeepsPrevious(t *testing.T) {
 	store := newViewStore(t)
 	if err := store.Put("Due", "status:pending"); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -2387,7 +2461,7 @@ func TestViewFilterFlushFailureKeepsPrevious(t *testing.T) {
 	f := New(backend.NewQuery(&fakeRunner{fn: func([]string) ([]byte, error) { return []byte("[]"), nil }}),
 		Config{ViewStore: failing})
 	vn := resolveViewNode(t, f, "@Due")
-	qn := resolveFilterNode(t, vn)
+	qn := resolveViewFileNode(t, vn)
 	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY|syscall.O_TRUNC)
 	if errno != 0 {
 		t.Fatalf("Open: %v", errno)
@@ -2403,33 +2477,33 @@ func TestViewFilterFlushFailureKeepsPrevious(t *testing.T) {
 	}
 }
 
-func TestViewRemoveFilterClearsButKeepsView(t *testing.T) {
+func TestViewRemoveDefinitionClearsButKeepsView(t *testing.T) {
 	fs, runner, _ := newSweepFSWithViews(t, backend.RemoveDelete,
 		[]testView{{Name: "Due", Filter: "status:pending"}},
 		task(uuidA, "Do taxes", "home"),
 	)
 	vn := resolveViewNode(t, fs, "@Due")
-	if errno := vn.Unlink(context.Background(), filterFileName); errno != 0 {
-		t.Fatalf("unlink _filter: %v", errno)
+	if errno := vn.Unlink(context.Background(), viewFileName); errno != 0 {
+		t.Fatalf("unlink _view: %v", errno)
 	}
 	if names := readdirOfRoot(t, fs); !contains(names, "@Due") {
-		t.Errorf("view disappeared after _filter removal: %v", names)
+		t.Errorf("view disappeared after _view removal: %v", names)
 	}
 	if names := readdirViewOf(t, vn); len(names) != 0 {
-		t.Errorf("view after _filter removal = %v, want no entries", names)
+		t.Errorf("view after _view removal = %v, want no entries", names)
 	}
-	if _, errno := vn.resolveChild(context.Background(), filterFileName, false); errno != syscall.ENOENT {
-		t.Errorf("lookup _filter after removal: errno = %v, want ENOENT", errno)
+	if _, errno := vn.resolveChild(context.Background(), viewFileName, false); errno != syscall.ENOENT {
+		t.Errorf("lookup _view after removal: errno = %v, want ENOENT", errno)
 	}
 	if query, ok, err := fs.viewStore.Get("Due"); err != nil || !ok || query != "" {
 		t.Errorf("stored query = %q, %v, %v; want empty definition", query, ok, err)
 	}
 	if n := mutationCount(runner); n != 0 {
-		t.Errorf("_filter removal issued %d task mutations", n)
+		t.Errorf("_view removal issued %d task mutations", n)
 	}
 }
 
-func TestViewInvalidFilterReturnsEIO(t *testing.T) {
+func TestViewInvalidDefinitionReturnsEIO(t *testing.T) {
 	store := newViewStore(t)
 	if err := store.Put("Broken", "("); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -2451,14 +2525,14 @@ func TestViewInvalidFilterReturnsEIO(t *testing.T) {
 	}
 }
 
-func TestViewAllowsOnlyFilterCreation(t *testing.T) {
+func TestViewAllowsOnlyDefinitionCreation(t *testing.T) {
 	fs, _, _ := newSweepFSWithViews(t, backend.RemoveDelete, []testView{{Name: "Due", Filter: ""}})
 	vn := resolveViewNode(t, fs, "@Due")
-	if _, _, _, errno := vn.createFilter(context.Background(), "New task", syscall.O_WRONLY); errno != syscall.EACCES {
+	if _, _, _, errno := vn.createViewFile(context.Background(), "New task", syscall.O_WRONLY); errno != syscall.EACCES {
 		t.Errorf("create non-query: errno = %v, want EACCES", errno)
 	}
-	if _, _, _, errno := vn.createFilter(context.Background(), filterFileName, syscall.O_WRONLY); errno != 0 {
-		t.Errorf("create _filter: errno = %v", errno)
+	if _, _, _, errno := vn.createViewFile(context.Background(), viewFileName, syscall.O_WRONLY); errno != 0 {
+		t.Errorf("create _view: errno = %v", errno)
 	}
 	if _, errno := vn.Mkdir(context.Background(), "sub", 0o755, &fuse.EntryOut{}); errno != syscall.EACCES {
 		t.Errorf("Mkdir: errno = %v, want EACCES", errno)
@@ -2504,33 +2578,33 @@ func TestViewShadowsAndRevealsProject(t *testing.T) {
 	}
 }
 
-func resolveFilterNode(t *testing.T, vn *viewNode) *filterFileNode {
+func resolveViewFileNode(t *testing.T, vn *viewNode) *viewFileNode {
 	t.Helper()
-	child, errno := vn.resolveChild(context.Background(), filterFileName, false)
+	child, errno := vn.resolveChild(context.Background(), viewFileName, false)
 	if errno != 0 {
-		t.Fatalf("lookup _filter: %v", errno)
+		t.Fatalf("lookup _view: %v", errno)
 	}
-	qn, ok := child.(*filterFileNode)
+	qn, ok := child.(*viewFileNode)
 	if !ok {
-		t.Fatalf("lookup _filter returned %T", child)
+		t.Fatalf("lookup _view returned %T", child)
 	}
 	return qn
 }
 
-func createFilterNode(t *testing.T, vn *viewNode, flags uint32) (*filterFileNode, fs.FileHandle) {
+func createViewFileNode(t *testing.T, vn *viewNode, flags uint32) (*viewFileNode, fs.FileHandle) {
 	t.Helper()
-	child, handle, _, errno := vn.createFilter(context.Background(), filterFileName, flags)
+	child, handle, _, errno := vn.createViewFile(context.Background(), viewFileName, flags)
 	if errno != 0 {
-		t.Fatalf("create _filter: %v", errno)
+		t.Fatalf("create _view: %v", errno)
 	}
-	qn, ok := child.(*filterFileNode)
+	qn, ok := child.(*viewFileNode)
 	if !ok {
-		t.Fatalf("create _filter returned %T", child)
+		t.Fatalf("create _view returned %T", child)
 	}
 	return qn, handle
 }
 
-func filterSize(t *testing.T, qn *filterFileNode) int {
+func definitionSize(t *testing.T, qn *viewFileNode) int {
 	t.Helper()
 	var out fuse.AttrOut
 	if errno := qn.Getattr(context.Background(), nil, &out); errno != 0 {
@@ -2539,7 +2613,7 @@ func filterSize(t *testing.T, qn *filterFileNode) int {
 	return int(out.Size)
 }
 
-func readFilter(t *testing.T, qn *filterFileNode) string {
+func readViewFile(t *testing.T, qn *viewFileNode) string {
 	t.Helper()
 	handle, _, errno := qn.Open(context.Background(), syscall.O_RDONLY)
 	if errno != 0 {
@@ -2557,7 +2631,7 @@ func readFilter(t *testing.T, qn *filterFileNode) string {
 	return string(data)
 }
 
-func writeFilter(t *testing.T, qn *filterFileNode, query string) {
+func writeViewFile(t *testing.T, qn *viewFileNode, query string) {
 	t.Helper()
 	handle, _, errno := qn.Open(context.Background(), syscall.O_WRONLY|syscall.O_TRUNC)
 	if errno != 0 {

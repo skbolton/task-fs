@@ -12,11 +12,11 @@ import (
 	"task-fs/internal/naming"
 )
 
-const FilterFileName = "_filter"
+const ViewFileName = "_view"
 
-// noFilter marks a view that has no mounted _filter file. An empty
-// filter file is a real, visible file and is stored as empty content.
-const noFilter = "\x00"
+// noView marks a view that has no mounted _view file. An empty
+// definition file is a real, visible file and is stored as empty content.
+const noView = "\x00"
 
 var (
 	ErrInvalidName = errors.New("invalid view name")
@@ -24,7 +24,7 @@ var (
 	ErrNotExist    = errors.New("view does not exist")
 )
 
-// Store holds one filter file per runtime view.
+// Store holds one definition file per runtime view.
 type Store struct {
 	dir string
 }
@@ -72,8 +72,8 @@ func NewStore(dir string) (*Store, error) {
 	return store, nil
 }
 
-// migrate converts pre-empty-filter stores to the marker encoding once.
-// An empty file used to mean "no filter"; now it means an empty filter.
+// migrate converts pre-empty-definition stores to the marker encoding once.
+// An empty file used to mean "no definition"; now it means an empty one.
 func (s *Store) migrate() error {
 	tmpDir := filepath.Join(s.dir, ".tmp")
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
@@ -105,7 +105,7 @@ func (s *Store) migrate() error {
 			continue
 		}
 		path := filepath.Join(s.dir, entry.Name())
-		if err := os.WriteFile(path, []byte(noFilter), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(noView), 0o600); err != nil {
 			return err
 		}
 		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
@@ -157,9 +157,9 @@ func (s *Store) List() ([]string, error) {
 	return names, nil
 }
 
-// Get returns a view's raw filter text. ok is false when no definition
+// Get returns a view's raw definition text. ok is false when no definition
 // exists; an invalid name is an error of its own.
-func (s *Store) Get(name string) (filter string, ok bool, err error) {
+func (s *Store) Get(name string) (definition string, ok bool, err error) {
 	if err := ValidateName(name); err != nil {
 		return "", false, err
 	}
@@ -170,14 +170,14 @@ func (s *Store) Get(name string) (filter string, ok bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
-	if string(data) == noFilter {
+	if string(data) == noView {
 		return "", true, nil
 	}
 	return string(data), true, nil
 }
 
-// HasFilter reports whether a view has a mounted _filter file.
-func (s *Store) HasFilter(name string) (bool, error) {
+// HasView reports whether a view has a mounted _view file.
+func (s *Store) HasView(name string) (bool, error) {
 	if err := ValidateName(name); err != nil {
 		return false, err
 	}
@@ -188,10 +188,10 @@ func (s *Store) HasFilter(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return string(data) != noFilter, nil
+	return string(data) != noView, nil
 }
 
-// Create adds a view with no filter and fails if one already exists.
+// Create adds a view with no definition and fails if one already exists.
 func (s *Store) Create(name string) error {
 	if err := ValidateName(name); err != nil {
 		return err
@@ -203,7 +203,7 @@ func (s *Store) Create(name string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := file.WriteString(noFilter); err != nil {
+	if _, err := file.WriteString(noView); err != nil {
 		file.Close()
 		return err
 	}
@@ -211,7 +211,7 @@ func (s *Store) Create(name string) error {
 }
 
 // Put replaces a view definition atomically.
-func (s *Store) Put(name, filter string) error {
+func (s *Store) Put(name, definition string) error {
 	if err := ValidateName(name); err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func (s *Store) Put(name, filter string) error {
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(tmpDir, "filter-*")
+	tmp, err := os.CreateTemp(tmpDir, "view-*")
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func (s *Store) Put(name, filter string) error {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.WriteString(filter); err != nil {
+	if _, err := tmp.WriteString(definition); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -245,8 +245,8 @@ func (s *Store) Put(name, filter string) error {
 }
 
 // ImportViews brings @NAME directories found in a mountpoint into the
-// store. A directory without _filter becomes a no-op view; a newer
-// _filter or directory replaces an older stored definition.
+// store. A directory without _view becomes a no-op view; a newer
+// _view or directory replaces an older stored definition.
 func (s *Store) ImportViews(mountpoint string) error {
 	entries, err := os.ReadDir(mountpoint)
 	if err != nil {
@@ -265,19 +265,19 @@ func (s *Store) ImportViews(mountpoint string) error {
 			sourceTime = info.ModTime().UnixNano()
 		}
 
-		filter := ""
-		hasFilter := false
-		filterPath := filepath.Join(mountpoint, entry.Name(), FilterFileName)
-		if info, err := os.Stat(filterPath); err == nil {
+		definition := ""
+		hasDefinition := false
+		viewPath := filepath.Join(mountpoint, entry.Name(), ViewFileName)
+		if info, err := os.Stat(viewPath); err == nil {
 			if !info.Mode().IsRegular() {
 				continue
 			}
-			data, err := os.ReadFile(filterPath)
+			data, err := os.ReadFile(viewPath)
 			if err != nil {
 				continue
 			}
-			hasFilter = true
-			filter = string(data)
+			hasDefinition = true
+			definition = string(data)
 			if modified := info.ModTime().UnixNano(); modified > sourceTime {
 				sourceTime = modified
 			}
@@ -290,8 +290,8 @@ func (s *Store) ImportViews(mountpoint string) error {
 			return storedErr
 		}
 		if errors.Is(storedErr, os.ErrNotExist) {
-			if hasFilter {
-				if err := s.Put(name, filter); err != nil {
+			if hasDefinition {
+				if err := s.Put(name, definition); err != nil {
 					return err
 				}
 			} else if err := s.Create(name); err != nil {
@@ -302,20 +302,20 @@ func (s *Store) ImportViews(mountpoint string) error {
 		if sourceTime <= storedInfo.ModTime().UnixNano() {
 			continue
 		}
-		if hasFilter {
-			if err := s.Put(name, filter); err != nil {
+		if hasDefinition {
+			if err := s.Put(name, definition); err != nil {
 				return err
 			}
-		} else if err := s.DeleteFilter(name); err != nil {
+		} else if err := s.DeleteViewFile(name); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// DeleteFilter removes a view's _filter while keeping the view.
-func (s *Store) DeleteFilter(name string) error {
-	return s.Put(name, noFilter)
+// DeleteViewFile removes a view's _view while keeping the view.
+func (s *Store) DeleteViewFile(name string) error {
+	return s.Put(name, noView)
 }
 
 // Delete removes a view definition.
